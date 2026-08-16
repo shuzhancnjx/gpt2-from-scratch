@@ -14,8 +14,7 @@ src/gpt2/
   training/
     config.py       TrainConfig — every knob in one dataclass
     runtime.py      device / DDP / mixed-precision setup
-    schedule.py     LR schedule (warmup + cosine)
-    loop.py         train(), evaluate()
+    loop.py         train(), evaluate(), get_lr()
 scripts/            prepare_data.py, train.py, plot_loss.py
 tests/              pytest suite
 learning/           earlier study code, kept as a record
@@ -83,10 +82,10 @@ model* on *new data*, move the window and resume:
 
 ```python
 TrainConfig(
-    first_shard=3,          # next window
-    num_shards=4,
-    resume_from='latest',   # newest checkpoint in runs/
-    lr_schedule_steps=4272, # pin one continuous cosine across all windows
+    first_shard=3,           # next window
+    num_shards=1,
+    resume_from='latest',    # newest checkpoint in runs/
+    lr_schedule_steps=2441,  # see below
 )
 ```
 
@@ -96,6 +95,20 @@ has already seen.
 
 `resume_from` accepts `'latest'`, a bare filename, or a path. `'latest'` starts fresh
 if the run directory is empty; an explicit path that is missing raises.
+
+**`lr_schedule_steps` is cumulative.** It is the span the cosine is stretched over, not
+the length of this run — so it is *every step trained so far, plus this window*. A first
+run of 1831 steps followed by a 610-step window gives `2441`. Leave it unset and the
+schedule re-spans to the current run's end, which pushes the learning rate back up
+toward `max_lr` — a warm restart. That is a legitimate technique, but it should be a
+choice rather than a side effect.
+
+Two knobs pair with a continuation:
+
+- `reset_data_position=True` — restore weights and optimizer but start at the front of
+  the window. Needed only for checkpoints written before shard names were recorded,
+  since those cannot be checked against the window.
+- `keep_last_n_checkpoints` — checkpoints are ~1.5 GB each; the default keeps 3.
 
 ## Plotting
 

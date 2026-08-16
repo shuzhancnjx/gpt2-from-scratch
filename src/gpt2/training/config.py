@@ -21,8 +21,8 @@ class TrainConfig:
     total_batch_size: int = 16384    # tokens per optimizer step, before grad accum
 
     # --- data window: shards[first_shard : first_shard + num_shards] ---
-    first_shard: int = 3
-    num_shards: int = 4
+    first_shard: int = 0
+    num_shards: int = 3
     data_root: Optional[str] = None
     num_epoch: int = 1
     max_steps: Optional[int] = None   # None = derive from the data window; set to cap a smoke run
@@ -41,7 +41,7 @@ class TrainConfig:
     grad_clip: float = 1.0
 
     # --- eval / logging ---
-    eval_every: int = 300
+    eval_every: int = 500
     eval_batches: int = 20
     sample_prompt: str = 'hello, I am a language model, '
     sample_sequences: int = 5
@@ -50,7 +50,9 @@ class TrainConfig:
 
     # --- run artifacts ---
     run_dir: Optional[str] = None
-    resume_from: Optional[str] = 'latest'
+    # None = train from scratch. 'latest' picks the newest checkpoint in run_dir
+    # (and starts fresh if there is none); a filename or path resumes that one.
+    resume_from: Optional[str] = None
     keep_last_n_checkpoints: Optional[int] = 3
     # Restore the model+optimizer but NOT the data position -- start at the front of
     # this window. Set True when moving to a new shard window with a checkpoint saved

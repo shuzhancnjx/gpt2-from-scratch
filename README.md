@@ -131,3 +131,20 @@ default to CUDA-only for this reason; both can be forced on.
 
 Micro-batch size is memory-bound rather than compute-bound here: `B=2` measured fastest,
 `B=4` was *slower* under allocator pressure, and `B=8` ran out of memory.
+
+## Acknowledgements
+
+This project follows **Andrej Karpathy's**
+[Neural Networks: Zero to Hero](https://karpathy.ai/zero-to-hero.html) course, in
+particular [*Let's reproduce GPT-2 (124M)*](https://github.com/karpathy/build-nanogpt)
+and [nanoGPT](https://github.com/karpathy/nanoGPT). The model architecture, the
+weight-tying and scaled-residual initialisation, the gradient-accumulation loop, and the
+FineWeb-Edu data pipeline all come from that material.
+
+The earlier steps of the course are kept in `learning/` — the attention exercise, the
+bigram-to-transformer progression, and the byte-pair encoder that became
+`src/gpt2/tokenizer.py`.
+
+Everything past that point — the package structure, shard windows for continuing a run
+on fresh data, checkpoint/resume handling, the test suite, and the Apple-silicon
+benchmarking — is my own work on top.

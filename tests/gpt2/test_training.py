@@ -6,7 +6,7 @@ import torch
 from gpt2.gpt import GPT, GPTConfig
 from gpt2.log import Logger, load_checkpoint, read_log
 from gpt2.training.runtime import Runtime
-from gpt2.training.schedule import get_lr
+from gpt2.training.loop import get_lr
 
 from conftest import TINY, FakeLoader
 

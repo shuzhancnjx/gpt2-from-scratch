@@ -6,6 +6,7 @@ the loop -- so gpt2.finetune can reuse this instead of forking it.
 """
 
 import glob
+import math
 import os
 import time
 
@@ -18,7 +19,24 @@ from gpt2.gpt import GPT, GPTConfig
 from gpt2.log import DEFAULT_RUN_DIR, Logger, load_checkpoint
 from gpt2.training.config import TrainConfig
 from gpt2.training.runtime import Runtime, setup_runtime
-from gpt2.training.schedule import get_lr
+
+
+def get_lr(step, max_steps, max_lr, min_lr, warmup_steps):
+    """Linear warmup, then cosine decay to min_lr.
+
+    max_steps is the span the cosine is stretched over, which on a continuation is
+    the cumulative total across every run so far -- not just this run's length. See
+    TrainConfig.lr_schedule_steps.
+    """
+    if step < warmup_steps:
+        return max_lr * (step + 1) / warmup_steps
+    if step > max_steps:
+        return min_lr
+
+    decay_ratio = (step - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
 
 
 def resolve_checkpoint(spec, run_dir):

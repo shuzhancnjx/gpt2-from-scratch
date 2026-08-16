@@ -1,0 +1,32 @@
+# NOTE: .gitignore has no inline comments -- a trailing "# ..." becomes part of
+# the pattern and silently matches nothing. Keep comments on their own lines.
+
+# --- datasets: regenerable, far too large for git ---
+# rebuild with: python scripts/prepare_data.py
+data/
+
+# --- run artifacts: checkpoints (~1.5 GB each) and loss logs ---
+runs/
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+
+# --- environments ---
+.venv/
+venv/
+env/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- editors / os ---
+.DS_Store
+.vscode/
+.idea/

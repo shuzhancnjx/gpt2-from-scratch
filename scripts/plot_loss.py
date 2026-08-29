@@ -71,7 +71,8 @@ def smooth(y, window):
     return total / count
 
 
-def plot(train_steps, train_loss, val_steps, val_loss, theme='light', out_path=None, total_steps=None):
+def plot(train_steps, train_loss, val_steps, val_loss, theme='light', out_path=None,
+         total_steps=None, smooth_window=None):
     """Draw the curve and return the Figure. Saves to out_path if given; the caller
     owns closing it, so a notebook can just let the figure render."""
     c = THEMES[theme]
@@ -104,9 +105,14 @@ def plot(train_steps, train_loss, val_steps, val_loss, theme='light', out_path=N
     if len(train_steps):
         ax.plot(train_steps, train_loss, color=c['train'], linewidth=1.0,
                 alpha=0.22, zorder=2, solid_capstyle='round')
-        window = max(3, len(train_steps) // 60)
+        # At a 16k-token batch the per-step loss jitters ~0.16 nats while the whole
+        # run improves ~0.26 -- the raw line is mostly sampling noise. Smooth over
+        # ~5% of the run so the trend is legible; the faint raw line still shows the
+        # spread it was computed from.
+        window = smooth_window or max(5, len(train_steps) // 20)
         ax.plot(train_steps, smooth(train_loss, window), color=c['train'],
-                linewidth=2.0, zorder=4, solid_capstyle='round', label='Train')
+                linewidth=2.0, zorder=4, solid_capstyle='round',
+                label=f'Train (mean of {window})')
 
     # --- val: sparse, so show the actual measurements ---
     if len(val_steps):
@@ -185,6 +191,8 @@ def main():
                     help='open the png in the default viewer after writing it')
     ap.add_argument('--total-steps', type=int, default=None,
                     help='draw the x-axis out to the full planned run')
+    ap.add_argument('--smooth', type=int, default=None,
+                    help='rolling-mean window for the train curve (default: ~5%% of the run)')
     args = ap.parse_args()
 
     if not os.path.exists(args.log):
@@ -199,7 +207,8 @@ def main():
     written = []
     for theme in themes:
         path = out if len(themes) == 1 else out.replace('.png', f'_{theme}.png')
-        fig = plot(*data, theme=theme, out_path=path, total_steps=args.total_steps)
+        fig = plot(*data, theme=theme, out_path=path, total_steps=args.total_steps,
+                   smooth_window=args.smooth)
         plt.close(fig)
         written.append(path)
         print(f'wrote {path}')

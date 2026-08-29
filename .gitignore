@@ -6,7 +6,10 @@
 data/
 
 # --- run artifacts: checkpoints (~1.5 GB each) and loss logs ---
-runs/
+# runs*/ so runs_small/ and any future runs_<name>/ are covered too
+runs*/
+results/
+*.log
 *.pt
 *.ckpt
 *.bin

@@ -30,7 +30,7 @@ class CausalSelfAttention(nn.Module):
 
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x):
+    def forward(self, x, kv_cache=None,  layer_idx=None, attn_mask=None):
         B, T, C = x.shape
 
         q, k, v = self.c_attn(x).split(self.config.n_embd, dim=2)
@@ -39,11 +39,23 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.config.n_head, self.head_size).transpose(1, 2)
         v = v.view(B, T, self.config.n_head, self.head_size).transpose(1, 2)
 
-        # flash attention: fuses the mask/softmax/dropout and never materializes T x T
-        y = F.scaled_dot_product_attention(
-            q, k, v, is_causal=True,
-            dropout_p=self.config.dropout if self.training else 0.0,
-        )  # B, NH, T, H
+        if kv_cache is not None: 
+            k, v = kv_cache.update(layer_idx, k, v)
+
+        drop_out = self.config.dropout if self.training else 0.0
+        if attn_mask is not None: 
+            y = F.scaled_dot_product_attention(
+                q, k, v, 
+                attn_mask=attn_mask, 
+                dropout_p=drop_out,
+            )
+        else: 
+            # flash attention: fuses the mask/softmax/dropout and never materializes T x T
+            y = F.scaled_dot_product_attention(
+                q, k, v, 
+                is_causal=(q.size(2) == k.size(2)), # to distinguish prefill or one token decoding
+                dropout_p=drop_out,
+            )  # B, NH, T, H
 
         y = y.transpose(1, 2).contiguous().view(B, T, self.head_size * self.config.n_head)
         y = self.c_proj(y)
@@ -78,8 +90,8 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, kv_cache=None, layer_idx=None, attn_mask=None):
+        x = x + self.attn(self.ln_1(x), kv_cache=kv_cache, layer_idx=layer_idx, attn_mask=attn_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -113,20 +125,32 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, kv_cache=None, pos_ids=None, attn_mask=None):
         B, T = idx.shape
 
-        assert T <= self.config.block_size, \
-            f'cannot forward sequence of length {T}, block size {self.config.block_size}'
+        past = 0 if kv_cache is None else kv_cache.seq_len() 
+        assert past + T <= self.config.block_size, \
+            f'cannot forward sequence of length {past + T}, block size {self.config.block_size}'
 
         token_embd = self.transformer.wte(idx)
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-        pos_embd = self.transformer.wpe(pos)
+
+        if pos_ids is None: 
+            pos_ids = torch.arange(past, past + T, dtype=torch.long, device=idx.device)
+        pos_embd = self.transformer.wpe(pos_ids)
+
+        sdpa_mask = None 
+        if attn_mask is not None: 
+            sdpa_mask = attn_mask[:, None, None, :]
+            if past == 0: 
+                tri = torch.ones(T, T, dtype=torch.bool, device=idx.device).tril()
+                sdpa_mask = sdpa_mask & tri
 
         x = token_embd + pos_embd
 
-        for block in self.transformer.h:
-            x = block(x)
+        for i, block in enumerate(self.transformer.h):
+            x = block(x, kv_cache=kv_cache, layer_idx=i, attn_mask=sdpa_mask)
+        if kv_cache is not None: 
+            kv_cache.advance(T)
 
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)

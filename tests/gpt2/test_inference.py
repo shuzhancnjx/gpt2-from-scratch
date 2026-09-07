@@ -112,28 +112,52 @@ def test_cached_logits_match_uncached(gpt2_config):
     token whether or not attention is working -- so token equality passes even
     with the mask fully broken. Logits do not.
 
-    sample() always passes a mask, so this is also the only coverage of the other
-    two branches in forward(): is_causal=(q_len == kv_len) and the
-    arange(past, past + T) fallback.
+    The cache returns its whole W-wide buffer, so the mask is the only thing
+    hiding the not-yet-written slots -- which is why a cached forward now
+    requires one. The uncached reference on the right needs no mask: it is fed
+    exactly the real tokens and nothing else.
     """
     torch.manual_seed(0)
     model = GPT(gpt2_config).eval()
-    ids = torch.randint(0, 1000, (1, 5))
+    P, N = 5, 6
+    W = P + N
+
+    buf = torch.zeros(1, W, dtype=torch.long)
+    buf[0, :P] = torch.randint(0, 1000, (P,))
+    mask = torch.zeros(1, W, dtype=torch.bool)
+    mask[0, :P] = True
 
     with torch.inference_mode():
-        cache = KVCache(batch_size=1, device='cpu', config=gpt2_config)
-        logits, _ = model(ids, kv_cache=cache)
+        cache = KVCache(batch_size=1, device='cpu', config=gpt2_config, max_tokens=W)
+        pos = (mask.cumsum(1) - 1).clamp(min=0)
+        logits, _ = model(buf[:, :P], kv_cache=cache, pos_ids=pos[:, :P], attn_mask=mask)
 
-        for step in range(6):
+        for step in range(N):
             nxt = logits[:, -1, :].argmax(-1, keepdim=True)
-            ids = torch.cat([ids, nxt], dim=1)
+            col = P + step
+            buf[0, col], mask[0, col] = nxt[0, 0], True     # mark it BEFORE the forward
 
-            cached, _ = model(nxt, kv_cache=cache)   # one token, rest from cache
-            full, _ = model(ids)                     # whole prefix, no cache
+            cached, _ = model(nxt, kv_cache=cache,
+                              pos_ids=torch.tensor([[col]]), attn_mask=mask)
+            full, _ = model(buf[:, :col + 1])               # whole prefix, no cache
 
             assert torch.allclose(cached[:, -1], full[:, -1], atol=1e-5), \
                 f'cached logits diverged from recomputed at step {step}'
             logits = cached
+
+
+def test_cached_forward_without_a_mask_is_rejected(gpt2_config):
+    """The buffer is full-width, so unwritten slots are real zeros in k and v.
+
+    Without a mask they are attended to like any other key -- silently, since the
+    shapes are valid. The guard turns that into an error at the call site.
+    """
+    torch.manual_seed(0)
+    model = GPT(gpt2_config).eval()
+    cache = KVCache(batch_size=1, device='cpu', config=gpt2_config, max_tokens=8)
+
+    with pytest.raises(AssertionError):
+        model(torch.randint(0, 1000, (1, 5)), kv_cache=cache)
 
 
 def test_padded_row_logits_match_unpadded(gpt2_config):
@@ -156,7 +180,7 @@ def test_padded_row_logits_match_unpadded(gpt2_config):
     pos_ids = (mask.cumsum(1) - 1).clamp(min=0)
 
     with torch.inference_mode():
-        cache = KVCache(batch_size=2, device='cpu', config=gpt2_config)
+        cache = KVCache(batch_size=2, device='cpu', config=gpt2_config, max_tokens=L)
         batched, _ = model(idx, kv_cache=cache, pos_ids=pos_ids, attn_mask=mask)
         alone, _ = model(short)
 
@@ -175,11 +199,14 @@ def test_all_layers_write_the_same_slots(gpt2_config):
     """
     torch.manual_seed(0)
     model = GPT(gpt2_config).eval()
-    cache = KVCache(batch_size=1, device='cpu', config=gpt2_config)
-    T = 5
+    T, W = 5, 12                      # W > T so there is room to detect a stray write
+    cache = KVCache(batch_size=1, device='cpu', config=gpt2_config, max_tokens=W)
+
+    mask = torch.zeros(1, W, dtype=torch.bool)
+    mask[0, :T] = True
 
     with torch.inference_mode():
-        model(torch.randint(0, 1000, (1, T)), kv_cache=cache)
+        model(torch.randint(0, 1000, (1, T)), kv_cache=cache, attn_mask=mask)
 
     assert cache.seq_len() == T
     for layer in range(gpt2_config.n_layer):
@@ -191,12 +218,17 @@ def test_all_layers_write_the_same_slots(gpt2_config):
 def test_pos_advances_by_token_count(gpt2_config):
     torch.manual_seed(0)
     model = GPT(gpt2_config).eval()
-    cache = KVCache(batch_size=1, device='cpu', config=gpt2_config)
+    W = 12
+    cache = KVCache(batch_size=1, device='cpu', config=gpt2_config, max_tokens=W)
+    mask = torch.zeros(1, W, dtype=torch.bool)
 
     with torch.inference_mode():
-        model(torch.randint(0, 1000, (1, 5)), kv_cache=cache)
+        mask[0, :5] = True
+        model(torch.randint(0, 1000, (1, 5)), kv_cache=cache, attn_mask=mask)
         assert cache.seq_len() == 5
-        model(torch.randint(0, 1000, (1, 1)), kv_cache=cache)
+
+        mask[0, 5] = True                      # the slot this forward will write
+        model(torch.randint(0, 1000, (1, 1)), kv_cache=cache, attn_mask=mask)
         assert cache.seq_len() == 6
 
 
@@ -234,18 +266,64 @@ def test_return_type_follows_input_type(inference):
 
 
 def test_generation_stops_at_eot(inference, monkeypatch):
-    """Reaching eot must end the loop early rather than running to the cap."""
-    calls = {'n': 0}
+    """Reaching eot must end the loop early rather than running to the cap.
 
-    def fake_sample(logits, **kwargs):
-        calls['n'] += 1
-        eot = inference.enc.eot_token
-        return torch.full((logits.size(0), 1), eot, dtype=torch.long)
+    Stopping is no longer immediate: reading `done` forces a device sync, so the
+    loop only checks every STOP_CHECK_EVERY steps and trades a bounded amount of
+    wasted work for far fewer stalls.
 
-    monkeypatch.setattr(inference, 'sample_next_token', fake_sample)
-    inference.sample('Hello', max_new_tokens=50, temperature=0)
+    Rather than pin the interval, this asserts the property that matters -- the
+    step count is governed by the eot, not by max_new_tokens. Quadrupling the cap
+    must not change how far it runs.
+    """
+    def run(max_new_tokens):
+        calls = {'n': 0}
 
-    assert calls['n'] == 1, 'should have stopped on the first eot, not run to 50'
+        def fake_sample(logits, **kwargs):
+            calls['n'] += 1
+            eot = inference.enc.eot_token
+            return torch.full((logits.size(0), 1), eot, dtype=torch.long)
+
+        monkeypatch.setattr(inference, 'sample_next_token', fake_sample)
+        inference.sample('Hello', max_new_tokens=max_new_tokens, temperature=0)
+        return calls['n']
+
+    short, long = run(100), run(400)
+
+    assert long < 400, 'ran to the cap -- eot never ended the loop'
+    assert short == long, (f'step count follows the cap ({short} vs {long}), '
+                           'so stopping is not eot-driven')
+
+
+def test_top_p_returns_vocab_ids_not_ranks(inference):
+    """top_p sorts the logits, so it must map the sample back to a vocab id.
+
+    Returning the sorted *position* instead is silent: rank 0 is a valid token id,
+    so generation just quietly produces low-id punctuation.
+    """
+    logits = torch.full((1, 50257), -10.0)
+    logits[0, 40000] = 10.0                       # one overwhelming favourite
+
+    out = inference.sample_next_token(logits, temperature=1.0, top_p=0.9)
+
+    assert out.item() == 40000
+
+
+def test_top_p_keeps_the_smallest_set_covering_p(inference):
+    """probs are ~[.826, .112, .041, .015, .006]; p=0.9 needs the first two."""
+    logits = torch.tensor([[5.0, 3.0, 2.0, 1.0, 0.0]])
+    seen = {inference.sample_next_token(logits, temperature=1.0, top_p=0.9).item()
+            for _ in range(300)}
+
+    assert seen == {0, 1}
+
+
+def test_top_p_degenerate_values_still_sample(inference):
+    """p=0 would drop every token (exclusive mass of the top token is 0)."""
+    logits = torch.tensor([[5.0, 3.0, 2.0, 1.0, 0.0]])
+
+    assert inference.sample_next_token(logits, temperature=1.0, top_p=0).item() == 0
+    assert inference.sample_next_token(logits, temperature=1.0, top_p=1.0).item() in range(5)
 
 
 def test_output_length_respects_max_new_tokens(inference):

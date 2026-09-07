@@ -126,24 +126,27 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None, kv_cache=None, pos_ids=None, attn_mask=None):
+
+        assert not (kv_cache is not None and attn_mask is None), 'a full-width cache needs a mask to hide unwritten slots'
+
         B, T = idx.shape
 
-        past = 0 if kv_cache is None else kv_cache.seq_len() 
-        assert past + T <= self.config.block_size, \
-            f'cannot forward sequence of length {past + T}, block size {self.config.block_size}'
+        assert T <= self.config.block_size, \
+            f'cannot forward sequence of length {T}, block size {self.config.block_size}'
 
         token_embd = self.transformer.wte(idx)
 
         if pos_ids is None: 
+            past = 0 if kv_cache is None else kv_cache.seq_len() 
             pos_ids = torch.arange(past, past + T, dtype=torch.long, device=idx.device)
         pos_embd = self.transformer.wpe(pos_ids)
 
         sdpa_mask = None 
         if attn_mask is not None: 
             sdpa_mask = attn_mask[:, None, None, :]
-            if past == 0: 
-                tri = torch.ones(T, T, dtype=torch.bool, device=idx.device).tril()
-                sdpa_mask = sdpa_mask & tri
+            if T > 1: 
+                S = attn_mask.size(1)
+                sdpa_mask = sdpa_mask & torch.ones(T, S, dtype=torch.bool, device=idx.device).tril()
 
         x = token_embd + pos_embd
 

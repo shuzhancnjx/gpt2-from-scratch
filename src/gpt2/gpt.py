@@ -30,7 +30,7 @@ class CausalSelfAttention(nn.Module):
 
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x, kv_cache=None,  layer_idx=None, attn_mask=None):
+    def forward(self, x, kv_cache=None,  layer_idx=None, attn_mask=None, cache_row=None):
         B, T, C = x.shape
 
         q, k, v = self.c_attn(x).split(self.config.n_embd, dim=2)
@@ -40,7 +40,7 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.config.n_head, self.head_size).transpose(1, 2)
 
         if kv_cache is not None: 
-            k, v = kv_cache.update(layer_idx, k, v)
+            k, v = kv_cache.update(layer_idx, k, v, row=cache_row)
 
         drop_out = self.config.dropout if self.training else 0.0
         if attn_mask is not None: 
@@ -90,8 +90,9 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x, kv_cache=None, layer_idx=None, attn_mask=None):
-        x = x + self.attn(self.ln_1(x), kv_cache=kv_cache, layer_idx=layer_idx, attn_mask=attn_mask)
+    def forward(self, x, kv_cache=None, layer_idx=None, attn_mask=None, cache_row=None):
+        x = x + self.attn(self.ln_1(x), kv_cache=kv_cache, layer_idx=layer_idx,
+                          attn_mask=attn_mask, cache_row=cache_row)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -125,7 +126,8 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, kv_cache=None, pos_ids=None, attn_mask=None):
+    def forward(self, idx, targets=None, kv_cache=None, pos_ids=None, attn_mask=None,
+                cache_row=None, cache_active=None):
 
         assert not (kv_cache is not None and attn_mask is None), 'a full-width cache needs a mask to hide unwritten slots'
 
@@ -151,9 +153,10 @@ class GPT(nn.Module):
         x = token_embd + pos_embd
 
         for i, block in enumerate(self.transformer.h):
-            x = block(x, kv_cache=kv_cache, layer_idx=i, attn_mask=sdpa_mask)
+            x = block(x, kv_cache=kv_cache, layer_idx=i, attn_mask=sdpa_mask,
+                      cache_row=cache_row)
         if kv_cache is not None: 
-            kv_cache.advance(T)
+            kv_cache.advance(T, row=cache_row, active=cache_active)
 
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)

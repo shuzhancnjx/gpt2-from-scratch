@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import torch
 from torch.distributed import init_process_group, destroy_process_group
 
+from gpt2.device import pick_device
+
 
 @dataclass
 class Runtime:
@@ -42,14 +44,6 @@ class Runtime:
     def shutdown(self):
         if self.ddp:
             destroy_process_group()
-
-
-def pick_device():
-    if torch.cuda.is_available():
-        return 'cuda'
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        return 'mps'
-    return 'cpu'
 
 
 def setup_runtime(use_compile=None, use_amp=None, seed=42):

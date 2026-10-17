@@ -44,6 +44,22 @@ class FakeLoader:
         return {'pos': self.pos}
 
 
+# CPU always; MPS on an Apple GPU, CUDA on an NVIDIA box -- whichever exist.
+# Device-sensitive tests take `device`; pure-logic tests do not need it.
+DEVICES = [
+    'cpu',
+    pytest.param('mps', marks=pytest.mark.skipif(
+        not torch.backends.mps.is_available(), reason='no MPS')),
+    pytest.param('cuda', marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason='no CUDA')),
+]
+
+
+@pytest.fixture(params=DEVICES)
+def device(request):
+    return request.param
+
+
 requires_data = pytest.mark.skipif(
     not os.path.isdir(DEFAULT_DATA_ROOT),
     reason=f'no token shards at {DEFAULT_DATA_ROOT}')

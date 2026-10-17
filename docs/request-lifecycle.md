@@ -12,23 +12,49 @@ prefill, prefix caching. Part V maps every concept back to the code in this repo
 
 ## At a glance
 
+**The CPU decides who runs, where their K/V goes, and when memory is reused; the GPU
+executes that plan, writing and reading K/V at addresses the CPU already resolved.**
+
 ```
-STARTUP (once)
-  profile memory → size the KV pool → free list → block table (host + device)
-  → persistent input buffers → capture CUDA graphs
+STARTUP (once)                                                         Part I
+  CPU profiles memory → GPU allocates the KV pool,
+      per layer (2, num_blocks, block_size, n_kv_head, head_dim)       §2–§3
+  CPU: free list, refcounts, prefix hashes, block table (authority)    §4
+  GPU: block-table mirror, persistent input buffers, CUDA graphs       §4, §6
 
 PER REQUEST
-  arrive → validate → tokenize → WAITING queue
+  arrive → validate → tokenize → WAITING queue                         §8
 
-PER ITERATION (the engine-core loop, one thread)
-  1 schedule   spend the token budget across running + waiting
-  2 allocate   prefix-cache lookup, block delta, free-list pop, fork / CoW decisions
-  3 pack       build the five arrays
-  4 sync       patch dirty block-table rows, copy arrays into persistent buffers
-  5 forward    per layer: project → write KV → attend
-  6 sample     logits at sampled rows only → token ids → host
-  7 update     append tokens, check stop, stream, retire / abort / preempt
+EVERY ITERATION — all active requests together, one forward            Parts II–IV
+  CPU, one thread
+    1 schedule   spend the token budget: decodes first, then prefill chunks     §9
+    2 admit      prefix-cache lookup → blocks needed? → free list + watermark   §10, §16
+    3 allocate   pop free blocks for the delta only — usually 0 for decode     §10
+                 fork / copy-on-write decisions                                 §17
+    4 pack       build the five arrays                                          §11
+    5 sync       copy the five arrays into the persistent buffers (every step)
+                 patch dirty block-table rows (only when an id entered a row)  §12, §19
+  GPU
+    6 forward    every layer: project → write K/V at slot_mapping
+                 → attend via the block table                                   §13
+    7 sample     logits for sampling rows only → token ids → back to the CPU   §13–§14
+  CPU
+    8 update     append tokens, check stop, stream out
+                 finish / abort → release blocks; out of memory → preempt      §14, §21
+  → next iteration
 ```
+
+Four things to hold onto while reading the rest:
+
+- **It is a loop over all requests at once, not one request served start to finish.**
+  Every iteration each active request contributes some tokens — a prefill chunk or one
+  decode token — to a single forward pass.
+- **Admission has two gates:** compute (the token budget) *and* memory (free blocks
+  above the watermark). A request can pass the first and fail the second.
+- **Allocation is a delta, and usually zero.** A decode step takes a new block only when
+  the last one fills (`num_computed_tokens % block_size == 0`).
+- **The five arrays ship every step; the block table is only patched.** In steady-state
+  decode most iterations send no block-table update at all.
 
 | Part | Covers |
 |---|---|
@@ -862,6 +888,14 @@ introduces the rest; §19 states the general rule.
 
 ## 13. Forward — where KV is written
 
+> **Companion doc.** [forward-and-sampling.md](forward-and-sampling.md) follows one
+> iteration through the hardware: GPU terms, CTAs and warps, who allocates which memory,
+> kernel launches in PyTorch / Triton / CUDA C++, CUDA graphs and why `int()` syncs, the
+> transformer block and self-attention, the attention grid and what each CTA loads,
+> online softmax, FlashAttention vs FlashDecoding, sampling on the GPU, and the sync back
+> to the CPU. This section keeps the serving-level view: where the KV write sits, how the
+> write and the attention can be arranged, and which rows get logits.
+
 ### Most of the model does not care
 
 Embeddings, LayerNorm, QKV projection, MLP and output projection are per-token. They
@@ -907,6 +941,23 @@ scattering rather than materialising a reshaped tensor first.
 Scale per iteration at 512 tokens: 1.5 MB written per layer, **18 MB added to the
 pool in total**. That is the entire mutation of the pool for the iteration; the 12
 attention reads are read-only.
+
+### Inside the attention kernel — in brief
+
+After the write, each layer launches one CTA per (query tile, head). A CTA loads its
+q_tile — that head's slice of one request's new queries — into SRAM once, then walks the
+request's block table (`physical = block_table[seq][logical]`, translated on the GPU),
+streaming one block's K and V slice at a time through SRAM and folding it into an
+**online softmax**: a running max, sum and weighted V, rescaled whenever a larger score
+appears. Older K/V come from earlier iterations — or from another request, through a
+prefix hit; the new tokens' K/V come from the write just before. **FlashAttention**
+splits *queries* across CTAs (prefill: many rows); **FlashDecoding** splits *keys*
+(decode: one row, long history) and merges the partial results. Nothing is gathered into
+a copy, and the score matrix never reaches HBM.
+
+The full walkthrough — iteration 4 of the running example, code for each piece, and the
+PyTorch gather version it beats — is Steps 3–4 of
+[forward-and-sampling.md](forward-and-sampling.md); the merge algebra is in Part V-A.
 
 ### Classic vs fused, concretely
 
@@ -1015,17 +1066,6 @@ write can happen later or never.
 
 A fused kernel turns out to be this same merge with the write added inside it — see the
 Triton version in Part V-A, whose step 3 is exactly the "new key only" half.
-
-### Attention: the only op that needs sequence structure
-
-Run plain attention over the flat array and R1 would attend to another request's keys.
-Segmentation comes from `cu_seqlens_q` (which queries belong to whom) plus
-`block_table` + `seqused_k` (which keys they may see). Each CTA finds its sequence,
-loads its query tile, then walks that sequence's block-table row, translating logical
-→ physical **on the device** and loading one block at a time. KV is never gathered into
-contiguous memory and the `q × kv` matrix is never materialised. Part V-A has the
-kernel in full: the block walk, online softmax, split-K, and FlashAttention vs
-FlashDecoding.
 
 ### Logits only where you will sample
 
@@ -1175,14 +1215,24 @@ Temperature 0 is greedy (argmax). Repetition, frequency and presence penalties n
 each request's token history on the device — an output-token count per request — kept
 up to date incrementally rather than rebuilt each step.
 
+Sampling runs after the last layer as ordinary GPU tensor ops — penalties, per-row
+temperature, top-k/top-p masks, softmax, then a draw that avoids a CPU sync
+(`probs / exponential noise → argmax`). The sampled ids stay on the GPU.
+forward-and-sampling.md Step 5 has the code.
+
 ### Back to the host
 
 The sampled ids, `(n_sample,)`, are copied device → host. This is the **one GPU→CPU
-sync per iteration** — everything else flows host → device — and async scheduling
-(§20) exists largely to hide it.
+sync per iteration** — everything else flows host → device.
 
 R1 samples `t0`, destined for position 7. Host update: `num_computed_tokens = 7`,
 `output_ids = [t0]`.
+
+The copy itself is tiny; what costs is **waiting** — `.tolist()` blocks until the whole
+forward has finished, and the GPU then idles while the CPU processes and schedules. The
+fix is not a faster copy but not waiting for it: keep the ids on the GPU for the next
+step and let the CPU read them one step later (§20; timelines and code in
+forward-and-sampling.md Step 6).
 
 ### Stop conditions
 
@@ -2153,18 +2203,33 @@ not be overwritten before the copy reads it. Same stream, in that order, gives b
 
 ### Async scheduling
 
-The device → host copy of sampled ids is a sync point: naively, the host idles while
-the GPU computes, then the GPU idles while the host schedules and packs. vLLM V1's async
-scheduling and SGLang's overlap scheduler prepare iteration *N+1* on the CPU while the
-GPU runs *N*.
+The device → host copy of sampled ids is a sync point (§14): synchronously, CPU and GPU
+take turns, so each step costs CPU time **plus** GPU time. vLLM V1's async scheduling and
+SGLang's overlap scheduler prepare iteration *N+1* on the CPU while the GPU runs *N*, so
+a step costs roughly the **larger** of the two. Two tricks make it possible:
 
-- **Placeholder tokens.** *N+1* needs tokens that *N* has not produced yet. They are
-  packed as placeholders and patched in on the device once sampling lands.
+1. **The sampled token never visits the CPU first.** Step N's sampler writes its ids
+   straight into step N+1's input buffer on the GPU; in the packed arrays these are
+   **placeholder** positions, filled on the device once sampling lands.
+2. **The CPU schedules optimistically**, assuming each running request produces exactly
+   one token — advancing `num_computed_tokens` and allocating blocks accordingly.
+
+What this means for the scheduler:
+
 - **Still one host thread.** The concurrency is host vs. GPU, not request vs. request.
   The GPU reads only the buffers shipped for *N*; *N+1*'s patches go out with *N+1*'s
   launch; stream order keeps each copy ahead of the kernels that read it.
 - **Aborts and stops lag by a step.** A request that finishes in *N* may already be in
-  *N+1*. Its extra sampled token is discarded when it arrives.
+  *N+1*. Its extra sampled token is computed and discarded — a small, bounded waste in
+  exchange for removing the CPU's time from every step.
+- **Going further.** Some engines run several decode steps on the GPU before returning
+  to the CPU at all — vLLM V0's *multi-step scheduling*. It saves more CPU time but every
+  lag grows to *k* steps: stops detected up to *k* tokens late, new requests admitted up
+  to *k* steps late, and blocks pre-allocated for *k* tokens. A one-step lag is the usual
+  compromise.
+
+Timelines, the event-based handoff code, what stays on the CPU, and when async helps
+most are in forward-and-sampling.md Step 6.
 
 ### Tensor parallel
 
@@ -2329,54 +2394,11 @@ allocation and write-address resolution; the device owns read translation.**
 
 ## A. Attention kernel internals
 
-### The block walk
-
-```
-grid = (query_tiles, heads[, kv_splits])
-
-each CTA:
-  1. which sequence owns my tile?             ← from cu_seqlens_q
-  2. load query tile → SRAM
-  3. read seqused_k and the block_table row
-  4. for logical = 0 … kv_len / block_size:
-         physical = block_table[seq, logical]  ← translation, on device
-         load kv_pool[physical] → SRAM         ← one block
-         QKᵀ, mask by absolute position,
-         online-softmax accumulate, then ·V
-  5. write output rows at their flat positions
-```
-
-KV is **never gathered** into contiguous memory and the `q_len × kv_len` attention
-matrix is **never materialised**.
-
-### Online softmax
-
-Each block yields a *partial* softmax, corrected retroactively. Running state per
-query row:
-
-```
-m  running max      (scalar)
-l  running sum      (scalar)
-o  running output   (head_dim)
-```
-
-On each block:
-
-```
-m_new      = max(m, s.max())
-correction = exp(m - m_new)          # shrink everything accumulated so far
-l          = l * correction + Σ exp(s - m_new)
-o          = o * correction + exp(s - m_new) @ V_block
-```
-
-then divide once at the end: `out = o / l`.
-
-Exact, not approximate — `softmax(x)ᵢ = exp(xᵢ − m) / Σ exp(xⱼ − m)` holds for any
-`m`, so changing `m` rescales numerator and denominator identically. The max is
-there for numerical stability.
-
-State is `O(head_dim)` per query row, **independent of context length**. That is
-what lets a 130k-token context be attended to from a few dozen KB of SRAM.
+The block walk, online softmax, and the FlashAttention / FlashDecoding kernels are
+walked through with the running example in [forward-and-sampling.md](forward-and-sampling.md)
+Step 4. This
+part covers what sits underneath: the merge algebra, why KV split is different from the
+other parallel axes, how the two kernels compare, and how to build a fused kernel.
 
 ### Split-K (FlashDecoding)
 
@@ -2891,7 +2913,8 @@ Each of these extends the design above rather than replacing it:
 | fixed `B` slots of width `W` | `max_num_seqs` **and** `max_num_batched_tokens`, two independent limits |
 | `_retire` — eot, `max_new_tokens`, cache full | stop checks + release, plus preemption |
 | `sampler` lambda over the whole batch | per-row sampling parameters |
-| — | free list, refcounts, prefix cache, CoW, abort, streaming: no equivalent |
+| `BlockAllocator`, `PagedKVCache`, `PagedScheduler` (`paged_*.py`, `block_allocator.py`) | free list, block table, slot mapping, admission by free blocks — paging in plain PyTorch with a gather read path (P1.4) |
+| — | refcounts, prefix cache, CoW, preemption, abort, streaming: no equivalent yet |
 
 A row in `RowKVCache` **is** a block — the degenerate case where `block_size == W`,
 one block per sequence, and the block table is the identity map. Paging makes that
@@ -2989,6 +3012,20 @@ mask half of it.
 high turnover. Only `pos[row] = 0` is needed for correctness — `_mask()` already blanks
 everything at or past `pos`. The zeroing is defence-in-depth. Under paging the
 equivalent is a refcount decrement, because `seqused_k` makes clearing unnecessary.
+
+**The scheduler syncs with the GPU several times per step** — the pattern §14 and §20
+describe:
+
+| in `scheduler.py` | what blocks |
+|---|---|
+| `while queue or bool(self.active.any())`, `if bool(self.active.any())` | `bool()` on a GPU tensor waits for the GPU |
+| `self.generated[...].append(int(tok[row]))` in `_decode`'s loop | the first `int()` waits for the whole forward; each is also its own tiny GPU→CPU transfer |
+| `int(self.cache.pos[row])` in `_retire` | another round trip per row |
+
+Fine for learning, but it serialises CPU and GPU. Keeping `active` and `pos` as CPU-side
+mirrors the scheduler updates itself, and doing **one** `tok.tolist()` per step instead
+of one `int()` per row, turns many small syncs into one — and is the prerequisite for
+overlapping them later.
 
 ### Suggested order of work
 

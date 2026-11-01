@@ -181,8 +181,26 @@ def train(cfg: TrainConfig, runtime: Runtime = None, model=None, raw_model=None,
         import tiktoken
         enc = tiktoken.get_encoding('gpt2')
 
+    hs_enc = None
+    if cfg.hellaswag_every and runtime.master_process:
+        import tiktoken
+        from gpt2.evaluation import evaluate_hellaswag
+        hs_enc = tiktoken.get_encoding('gpt2')
+
     for step in range(start_step, max_steps):
         last_step = (step == max_steps - 1)
+
+        # --- HellaSwag: does likelihood track meaning, as training proceeds? ---
+        # Master only, on the raw module (a compiled model would recompile for the
+        # varying example lengths). Other ranks simply wait at their next collective.
+        if hs_enc is not None and ((step > 0 and step % cfg.hellaswag_every == 0) or last_step):
+            t_hs = time.time()
+            hs = evaluate_hellaswag(raw_model, hs_enc, limit=cfg.hellaswag_limit,
+                                    device=runtime.device,
+                                    autocast_dtype=torch.bfloat16 if runtime.use_amp else None)
+            logger.log(step, 'hella', hs['acc_norm'])
+            runtime.print0(f'======> hellaswag acc_norm: {hs["acc_norm"]:.4f}  '
+                           f'acc: {hs["acc"]:.4f}  ({hs["n"]} examples, {time.time() - t_hs:.0f}s)')
 
         # --- eval runs alongside the training step, never instead of it ---
         if (step > 0 and step % cfg.eval_every == 0) or last_step:
@@ -232,6 +250,7 @@ def train(cfg: TrainConfig, runtime: Runtime = None, model=None, raw_model=None,
         runtime.print0(f'step {step}, loss: {loss_accum.item():.4f}, norm: {norm:.4f}, '
                        f'lr: {lr:.6f}, dt: {dt * 1000:.2f}ms, token/sec: {tokens_per_sec:.2f}')
         logger.log(step, 'train', loss_accum.item())
+        logger.log(step, 'tok_s', tokens_per_sec)   # throughput, for MFU
 
     runtime.shutdown()
     return raw_model

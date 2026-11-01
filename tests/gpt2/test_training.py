@@ -227,3 +227,45 @@ def test_an_explicit_missing_path_still_raises(tmp_path):
     from gpt2.training.loop import resolve_checkpoint
     with pytest.raises(FileNotFoundError):
         resolve_checkpoint('model_001830.pt', str(tmp_path))
+
+
+# --------------------------- in-loop evaluation ---------------------------
+
+def test_hellaswag_and_throughput_are_logged_during_training(tmp_path, cpu_runtime, monkeypatch):
+    """hellaswag_every=2 over steps 0..2 → one 'hella' record (step 2, also the last step);
+    one 'tok_s' record per step for MFU."""
+    import json
+    import gpt2.evaluation.hellaswag as hellaswag
+    from gpt2.training import TrainConfig, train
+
+    examples = [{'ctx': 'A man opens the door and', 'label': 0,
+                 'endings': ['walks inside.', 'is blue.', 'sky the.', 'of.']},
+                {'ctx': 'She picks up the pen and', 'label': 1,
+                 'endings': ['melts.', 'writes a letter.', 'the the.', 'cloud.']}]
+    path = tmp_path / 'hs.jsonl'
+    path.write_text('\n'.join(json.dumps(e) for e in examples))
+    monkeypatch.setattr(hellaswag, 'download', lambda *a, **k: str(path))
+
+    cfg = TrainConfig(vocab_size=50304, n_layer=1, n_head=2, n_embd=32, block_size=64,
+                      B=2, T=16, total_batch_size=32, max_steps=3, eval_every=100,
+                      eval_batches=1, sample_prompt='', hellaswag_every=2,
+                      run_dir=str(tmp_path / 'run'), use_compile=False, use_amp=False)
+    torch.manual_seed(0)
+    model = GPT(GPTConfig(**cfg.model_kwargs()))
+    logger = Logger(run_dir=cfg.run_dir)
+    train(cfg, runtime=cpu_runtime, model=model, raw_model=model,
+          train_loader=FakeLoader(2, 16, 50304), val_loader=FakeLoader(2, 16, 50304, seed=1),
+          logger=logger)
+
+    log = read_log(logger.log_file)
+    assert [step for step, _ in log['hella']] == [2]
+    assert all(0.0 <= acc <= 1.0 for _, acc in log['hella'])
+    assert len(log['tok_s']) == 3
+
+
+def test_read_log_keeps_new_record_types(tmp_path):
+    p = tmp_path / 'log.txt'
+    p.write_text('0 train 5.0\n0 tok_s 1000.0\n10 hella 0.27\n')
+    parsed = read_log(str(p))
+    assert parsed['hella'] == [(10, 0.27)] and parsed['tok_s'] == [(0, 1000.0)]
+    assert parsed['val'] == [], 'train and val stay present even when empty'

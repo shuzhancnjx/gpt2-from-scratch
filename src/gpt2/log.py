@@ -96,16 +96,19 @@ def load_checkpoint(path, map_location='cpu'):
 def read_log(path):
     """Parse a loss log into {'train': [(step, loss)], 'val': [...]}.
 
-    Tolerates a torn final line from a run that is still writing.
+    Tolerates a torn final line from a run that is still writing. Any record type is
+    kept -- 'hella' (HellaSwag acc_norm) and 'tok_s' (throughput) as well -- while
+    'train' and 'val' are always present, even if empty.
     """
     out = {'train': [], 'val': []}
     with open(path) as f:
         for line in f:
             parts = line.split()
-            if len(parts) != 3 or parts[1] not in out:
+            if len(parts) != 3:
                 continue
             try:
-                out[parts[1]].append((int(parts[0]), float(parts[2])))
+                record = (int(parts[0]), float(parts[2]))
             except ValueError:
                 continue
+            out.setdefault(parts[1], []).append(record)
     return out

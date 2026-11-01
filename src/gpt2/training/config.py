@@ -47,6 +47,10 @@ class TrainConfig:
     sample_sequences: int = 5
     sample_length: int = 50
     tokenizer_vocab: int = 50257     # real decodable vocab; logits are clipped to this
+    # HellaSwag accuracy (acc_norm) every N steps, logged as 'hella' next to 'val'.
+    # None = off. A full pass is 10,042 examples (~1 min on an A100); limit for speed.
+    hellaswag_every: Optional[int] = None
+    hellaswag_limit: Optional[int] = None
 
     # --- run artifacts ---
     run_dir: Optional[str] = None

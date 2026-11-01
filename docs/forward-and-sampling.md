@@ -386,7 +386,7 @@ Python a number.
 
 ## This repo's CUDA graph
 
-[decode_step.py](../src/gpt2/inference/decode_step.py) applies every rule above:
+[decode_step.py](../src/gpt2/inference/static_batch/decode_step.py) applies every rule above:
 
 ```python
 self.token = torch.zeros(B, 1, …, device=device)      # fixed input buffers, allocated once
@@ -402,7 +402,7 @@ with torch.cuda.graph(self.graph):                    # capture once
     self.logits, _ = model(self.token, …, pos_ids=self.pos, …)   # self.logits = fixed output
 ```
 
-and [inference.py](../src/gpt2/inference/inference.py) feeds it every step:
+and [inference.py](../src/gpt2/inference/static_batch/inference.py) feeds it every step:
 
 ```python
 step.token.copy_(next_token)
@@ -412,7 +412,7 @@ step.graph.replay()
 
 **Why `pos_ids=self.pos` is passed.** Without it, [gpt.py](../src/gpt2/gpt.py)'s default
 path computes `past = kv_cache.seq_len()` — `int(self.pos)`
-([kv_cache.py](../src/gpt2/inference/kv_cache.py)). During capture that is a sync, so
+([kv_cache.py](../src/gpt2/inference/static_batch/kv_cache.py)). During capture that is a sync, so
 capture fails; even if it were allowed, `torch.arange(past, past + T)` would be recorded as
 "fill with the capture-time value", embedding the same position on every replay. Passing
 `self.pos` makes the embedding kernel read positions **from GPU memory** on every replay.

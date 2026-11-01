@@ -5,7 +5,7 @@ what startup allocates, how a cold request is scheduled and computed, how later
 requests share its work, how the system stays correct under concurrency, and how
 requests leave.
 
-Written as a reference for the next steps after `gpt2/serving`: paging, chunked
+Written as a reference for the next steps after `gpt2/inference/continuous_batch`: paging, chunked
 prefill, prefix caching. Part V maps every concept back to the code in this repo.
 
 ---
@@ -2899,7 +2899,7 @@ Each of these extends the design above rather than replacing it:
 - **fp8 KV** — quantisation scales stored alongside the pool.
 - **KV offload tiers and multimodal encoder caches** — more pools, more addressing.
 
-## G. Mapping to `src/gpt2/serving`
+## G. Mapping to `src/gpt2/inference/continuous_batch`
 
 | This repo | Engine equivalent |
 |---|---|

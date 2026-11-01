@@ -18,10 +18,17 @@ milestone. The UI shows each reply's batch size so the batching is visible.
 The model is a base GPT-2, not a chat model: the conversation is rendered as a
 "User: / Assistant:" transcript and the reply is cut at the next turn. Expect
 web-text continuations, not instruction-following.
+
+Logs: what the engine is doing, as it does it --
+
+    python scripts/chat_server.py                      # INFO: requests, batches, admit/retire
+    python scripts/chat_server.py --log-level DEBUG    # + every decode step and full prompts
+    tail -f results/chat_server.log                    # follow from another terminal
 """
 
 import argparse
 import json
+import logging
 import queue
 import threading
 import time
@@ -33,7 +40,9 @@ import torch
 
 from gpt2.device import default_dtype, pick_device
 from gpt2.gpt import GPT, GPTConfig
-from gpt2.serving import PagedScheduler
+from gpt2.inference.continuous_batch import PagedScheduler
+
+log = logging.getLogger('chat_server')
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CKPT = REPO_ROOT / 'runs/keep/gpt2_124M_step013147.pt'
@@ -69,8 +78,16 @@ def make_sampler(temperature, top_k):
     return sample
 
 
-def render(messages, enc, budget):
-    """Transcript ending in 'Assistant:'; oldest turns dropped to fit the token budget."""
+def render(messages, enc, budget, history_turns=0):
+    """Transcript ending in 'Assistant:'; oldest turns dropped to fit the token budget.
+
+    history_turns: how many earlier user/assistant exchanges to include. Default 0
+    (single-turn) because a base model copies its own earlier replies: measured on
+    this checkpoint, one 'email@example.com' reply in the history makes the next reply
+    start with an email 31% of the time, two make it 69% (vs 0% with no history).
+    """
+    if history_turns is not None:
+        messages = messages[-(2 * history_turns + 1):]
     turns = [f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'].strip()}\n"
              for m in messages if m.get('content', '').strip()]
     while turns:
@@ -123,6 +140,7 @@ class Engine(threading.Thread):
                     break
 
             prompts = [job['prompt'] for job in batch]
+            log.info('batch %d: %d request(s) -> engine', self.runs + 1, len(batch))
             t0 = time.perf_counter()
             try:
                 outs = self.sched.run(prompts, max_new_tokens=self.max_new, sampler=self.sampler)
@@ -133,9 +151,15 @@ class Engine(threading.Thread):
                 continue
             seconds = time.perf_counter() - t0
             self.runs += 1
+            tokens = sum(len(g) for g in self.sched.generated.values())
+            log.info('batch %d done in %.2fs: %d tokens (%.1f tok/s), %d decode steps, '
+                     'peak %d blocks / %d requests resident',
+                     self.runs, seconds, tokens, tokens / seconds, self.sched.decode_steps,
+                     self.sched.peak_blocks, self.sched.peak_active)
 
             for i, (job, out) in enumerate(zip(batch, outs)):
-                job['reply'] = cut_reply(out[len(job['prompt']):])
+                job['raw'] = out[len(job['prompt']):]
+                job['reply'] = cut_reply(job['raw'])
                 job['stats'] = dict(batch_size=len(batch), seconds=round(seconds, 2),
                                     tokens=len(self.sched.generated.get(i, [])),
                                     resident=self.sched.peak_active,
@@ -145,7 +169,7 @@ class Engine(threading.Thread):
 
 # -- HTTP ------------------------------------------------------------------------
 
-def make_handler(engine, enc, budget, info):
+def make_handler(engine, enc, budget, info, history_turns):
 
     class Handler(BaseHTTPRequestHandler):
 
@@ -174,16 +198,28 @@ def make_handler(engine, enc, budget, info):
                 assert isinstance(messages, list) and messages
             except Exception:
                 return self._send(400, {'error': 'expected {"messages": [{"role", "content"}, ...]}'})
+            prompt = render(messages, enc, budget, history_turns)
+            log.info('user: %s', _clip(messages[-1].get('content', '')))
+            log.debug('prompt (%d tokens):\n%s', len(enc.encode(prompt)), prompt)
             try:
-                job = engine.submit(render(messages, enc, budget))
+                job = engine.submit(prompt)
             except Exception as e:
+                log.error('request failed: %s', e)
                 return self._send(500, {'error': str(e)})
+            log.debug('raw output (before the cut at the first newline):\n%s', job['raw'])
+            log.info('reply: %s  [%s]', _clip(job['reply']),
+                     ', '.join(f'{k}={v}' for k, v in job['stats'].items()))
             self._send(200, {'reply': job['reply'], 'stats': job['stats']})
 
-        def log_message(self, fmt, *args):         # one quiet line per request
-            print(f'{self.address_string()} {fmt % args}')
+        def log_message(self, fmt, *args):         # HTTP access lines: DEBUG only
+            log.debug('%s %s', self.address_string(), fmt % args)
 
     return Handler
+
+
+def _clip(text, n=100):
+    text = ' '.join(str(text).split())
+    return text if len(text) <= n else text[:n] + '…'
 
 
 PAGE = r"""<!doctype html>
@@ -230,6 +266,7 @@ PAGE = r"""<!doctype html>
   <form id="f">
     <textarea id="q" placeholder="Say something… (Enter to send, Shift+Enter for a newline)"></textarea>
     <button id="send">Send</button>
+    <button id="newchat" type="button" class="ghost" title="Forget this conversation">New chat</button>
     <button id="burst" type="button" class="ghost" title="Send this message as 4 separate requests at once, to see them batched">×4</button>
   </form>
 </div>
@@ -283,12 +320,17 @@ async function onSend(times) {
 
 document.getElementById('f').addEventListener('submit', e => { e.preventDefault(); onSend(1); });
 burst.addEventListener('click', () => onSend(4));
+document.getElementById('newchat').addEventListener('click', () => {
+  history.length = 0; log.innerHTML = ''; q.focus();
+});
 q.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(1); } });
 
 fetch('/api/info').then(r => r.json()).then(i => {
   document.getElementById('info').textContent =
     `${i.checkpoint} · ${i.device} · max ${i.max_seqs} concurrent · block size ${i.block_size} · ` +
-    `${i.num_blocks} blocks · temperature ${i.temperature} · up to ${i.max_new} new tokens · base model, not chat-tuned`;
+    `${i.num_blocks} blocks · temperature ${i.temperature} · up to ${i.max_new} new tokens · ` +
+    (i.history_turns ? `remembers ${i.history_turns} earlier exchange(s)` : 'single-turn (no memory of earlier messages)') +
+    ` · base model, not chat-tuned`;
 });
 q.focus();
 </script>
@@ -308,10 +350,24 @@ def main():
     p.add_argument('--max-new', type=int, default=64)
     p.add_argument('--temperature', type=float, default=0.8)
     p.add_argument('--top-k', type=int, default=40)
+    p.add_argument('--history-turns', type=int, default=0,
+                   help='earlier exchanges to include in the prompt (0 = single-turn; '
+                        'a base model copies its own past replies)')
+    p.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING'])
+    p.add_argument('--log-file', default=str(REPO_ROOT / 'results/chat_server.log'),
+                   help="also write logs here ('' to disable)")
     args = p.parse_args()
 
+    handlers = [logging.StreamHandler()]
+    if args.log_file:
+        Path(args.log_file).parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(args.log_file))
+    logging.basicConfig(level=args.log_level, handlers=handlers,
+                        format='%(asctime)s %(levelname)-5s %(name)s | %(message)s',
+                        datefmt='%H:%M:%S')
+
     device = pick_device(args.device)
-    print(f'loading {args.checkpoint} on {device} …')
+    log.info('loading %s on %s …', args.checkpoint, device)
     model, cfg = load_model(args.checkpoint, device)
     enc = tiktoken.get_encoding('gpt2')
 
@@ -324,10 +380,12 @@ def main():
 
     info = dict(checkpoint=Path(args.checkpoint).name, device=device, max_seqs=args.max_seqs,
                 block_size=args.block_size, num_blocks=sched.allocator.num_blocks,
-                temperature=args.temperature, max_new=args.max_new)
+                temperature=args.temperature, max_new=args.max_new,
+                history_turns=args.history_turns)
     budget = cfg.block_size - args.max_new
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(engine, enc, budget, info))
-    print(f'ready: http://{args.host}:{args.port}')
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(engine, enc, budget, info, args.history_turns))
+    log.info('ready: http://%s:%d  (log level %s%s)', args.host, args.port, args.log_level,
+             f', also -> {args.log_file}' if args.log_file else '')
     try:
         server.serve_forever()
     except KeyboardInterrupt:

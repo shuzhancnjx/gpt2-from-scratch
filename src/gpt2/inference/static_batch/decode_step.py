@@ -1,5 +1,5 @@
 import torch 
-from gpt2.inference.kv_cache import KVCache
+from gpt2.inference.static_batch.kv_cache import KVCache
 
 class DecodeStep: 
 

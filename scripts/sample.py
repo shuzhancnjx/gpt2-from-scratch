@@ -17,7 +17,7 @@ from pathlib import Path
 
 import torch
 
-from gpt2.inference.inference import GptInference
+from gpt2.inference.static_batch.inference import GptInference
 
 # Anchored to the repo, not the working directory, so the script runs from anywhere.
 REPO_ROOT = Path(__file__).resolve().parent.parent

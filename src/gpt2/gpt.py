@@ -174,7 +174,7 @@ class GPT(nn.Module):
         tokenizer's real vocab, and those extra rows are not decodable.
 
         No KV cache yet -- this re-runs the full prefix each step, which is fine for
-        short samples during training. The cached path lands in gpt2/inference/.
+        short samples during training. The cached path lands in gpt2/inference/static_batch/.
         """
         was_training = self.training
         self.eval()

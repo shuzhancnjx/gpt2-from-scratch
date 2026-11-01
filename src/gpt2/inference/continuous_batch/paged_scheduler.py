@@ -16,15 +16,24 @@ next step, and is what makes preemption necessary.)
 
 Decisions use host mirrors (row_blocks, row_len, row_active, num_active), so the
 scheduler never reads GPU tensors to decide anything.
+
+Logging: every admit, wait and retire is reported through the standard `logging`
+module (logger "gpt2.inference.continuous_batch.paged_scheduler") -- INFO for each request's lifecycle,
+DEBUG for every decode step. The library never configures logging itself; an app
+turns it on (see scripts/chat_server.py --log-level). Log calls read host values only,
+so they never force a GPU sync.
 """
 
+import logging
 from math import ceil
 
 import torch
 
-from gpt2.serving.block_allocator import BlockAllocator
-from gpt2.serving.paged_cache import PagedKVCache
-from gpt2.serving.scheduler import Scheduler
+from gpt2.inference.continuous_batch.block_allocator import BlockAllocator
+from gpt2.inference.continuous_batch.paged_cache import PagedKVCache
+from gpt2.inference.continuous_batch.scheduler import Scheduler
+
+log = logging.getLogger(__name__)
 
 
 class PagedScheduler(Scheduler):
@@ -65,6 +74,8 @@ class PagedScheduler(Scheduler):
 
         self.peak_active = 0                      # most requests resident at once
         self.peak_blocks = 0                      # most blocks in use at once
+        self.decode_steps = 0
+        self._waiting_req = None                  # log a wait once, not every step
 
     # -- the three operations --------------------------------------------------
 
@@ -97,6 +108,11 @@ class PagedScheduler(Scheduler):
                 if not self.num_active:           # unreachable given the checks above
                     raise RuntimeError('no progress: the head request cannot be admitted '
                                        'into an empty pool')
+                if self._waiting_req != req:
+                    self._waiting_req = req
+                    log.info('wait   req %d needs %d blocks, %d free (headroom %d) -- '
+                             'holding the queue until a request retires',
+                             req, need, self.allocator.num_free, headroom)
                 return                            # FCFS: wait; later requests may not skip ahead
 
             queue.popleft()
@@ -123,12 +139,22 @@ class PagedScheduler(Scheduler):
             self.peak_active = max(self.peak_active, self.num_active)
             self.peak_blocks = max(self.peak_blocks,
                                    self.allocator.capacity - self.allocator.num_free)
+            self._waiting_req = None
+            log.info('admit  req %d -> row %d: prompt %d tokens, %d blocks %s, '
+                     '%d/%d blocks free, %d active',
+                     req, row, L, need, _short(blocks), self.allocator.num_free,
+                     self.allocator.capacity, self.num_active)
 
     def _decode(self, sampler):
         super()._decode(sampler)
+        self.decode_steps += 1
         for row in range(self.B):
             if self.row_active[row]:
                 self.row_len[row] += 1                # one token written per active row
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug('decode step %d: %d active rows, lengths %s',
+                      self.decode_steps, self.num_active,
+                      [self.row_len[r] for r in range(self.B) if self.row_active[r]])
 
     def _retire(self, results, prompt_ids, max_new_tokens):
         eot = self.enc.eot_token
@@ -142,6 +168,9 @@ class PagedScheduler(Scheduler):
 
             if gen[-1] == eot or len(gen) >= max_new_tokens or full:
                 results[req] = gen
+                reason = ('end-of-text' if gen[-1] == eot else
+                          'max_new_tokens' if len(gen) >= max_new_tokens else 'cache width')
+                freed = len(self.row_blocks[row])
                 self.allocator.free(self.row_blocks[row])
                 self.row_blocks[row] = []
                 self.cache.release(row)               # back to scratch; pool not cleared
@@ -150,6 +179,10 @@ class PagedScheduler(Scheduler):
                 self.row_active[row] = False
                 self.row_len[row] = 0
                 self.num_active -= 1
+                log.info('retire req %d <- row %d: %s after %d tokens, freed %d blocks, '
+                         '%d/%d blocks free, %d active',
+                         req, row, reason, len(gen), freed, self.allocator.num_free,
+                         self.allocator.capacity, self.num_active)
 
     def _reset(self):
         super()._reset()                              # cache, active, next_token, slot_req, generated
@@ -160,3 +193,10 @@ class PagedScheduler(Scheduler):
         self.num_active = 0
         self.peak_active = 0
         self.peak_blocks = 0
+        self.decode_steps = 0
+        self._waiting_req = None
+
+
+def _short(blocks, n=6):
+    """[3, 4, 5, …] -- block lists can be long; the first few say enough."""
+    return str(blocks) if len(blocks) <= n else f'[{", ".join(map(str, blocks[:n]))}, …]'

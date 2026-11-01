@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from gpt2.gpt import GPT, GPTConfig
-from gpt2.serving import PagedScheduler, Scheduler
+from gpt2.inference.continuous_batch import PagedScheduler, Scheduler
 
 GPT2_TINY = dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=32,
                  block_size=128, dropout=0.0, bias=True)
@@ -173,3 +173,32 @@ def test_a_watermark_never_blocks_an_empty_pool(parts):
                            num_blocks=4, watermark=100)        # watermark > the whole pool
     got = sched.run(['Hello', 'A'], max_new_tokens=3)
     assert got == [greedy_reference(model, enc, p, 3) for p in ['Hello', 'A']]
+
+
+# -- logging -------------------------------------------------------------------
+
+def test_each_request_logs_one_admit_and_one_retire(parts, caplog):
+    import logging
+    model, enc, cfg = parts
+    caplog.set_level(logging.INFO, logger='gpt2.inference.continuous_batch.paged_scheduler')
+    PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W).run(
+        PROMPTS, max_new_tokens=3)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    for req in range(len(PROMPTS)):
+        assert sum(m.startswith(f'admit  req {req} ') for m in msgs) == 1, f'req {req} admit'
+        assert sum(m.startswith(f'retire req {req} ') for m in msgs) == 1, f'req {req} retire'
+
+
+def test_a_wait_is_logged_once_not_every_step(parts, caplog):
+    import logging
+    model, enc, cfg = parts
+    caplog.set_level(logging.INFO, logger='gpt2.inference.continuous_batch.paged_scheduler')
+    longest = max(len(enc.encode(p)) for p in PROMPTS)
+    sched = PagedScheduler(model, enc, cfg, max_seqs=4, block_size=4, max_tokens=W,
+                           num_blocks=1 + -(-(longest + 4) // 4))      # one request at a time
+    sched.run(PROMPTS, max_new_tokens=4)
+
+    waits = [r.getMessage() for r in caplog.records if r.getMessage().startswith('wait')]
+    assert waits, 'a tight pool should make requests wait'
+    assert len(waits) == len(set(waits)), 'the same wait was logged repeatedly'

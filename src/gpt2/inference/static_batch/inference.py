@@ -1,8 +1,8 @@
 import torch 
 import tiktoken
-from gpt2.inference.kv_cache import KVCache
+from gpt2.inference.static_batch.kv_cache import KVCache
 from gpt2.gpt import GPT, GPTConfig
-from gpt2.inference.decode_step import DecodeStep
+from gpt2.inference.static_batch.decode_step import DecodeStep
 import time 
 
 class GptInference: 
@@ -74,7 +74,6 @@ class GptInference:
             idx[i, L-len(s):L] = torch.tensor(s, device=self.device)
             mask[i, L-len(s):L] = True 
        
-
         self._sync() 
         t0 = time.perf_counter()
 
@@ -84,7 +83,6 @@ class GptInference:
         self._sync() 
         prefill_s = time.perf_counter() - t0 
 
-    
         done = torch.zeros(B_cap, dtype=torch.bool, device=self.device)
         done[B:] = True 
         row_pos = mask.sum(1) - 1

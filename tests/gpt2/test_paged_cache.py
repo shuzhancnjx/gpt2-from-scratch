@@ -10,9 +10,9 @@ import pytest
 import torch
 
 from gpt2.gpt import GPTConfig
-from gpt2.serving import RowKVCache
-from gpt2.serving.block_allocator import SCRATCH
-from gpt2.serving.paged_cache import PagedKVCache
+from gpt2.inference.continuous_batch import RowKVCache
+from gpt2.inference.continuous_batch.block_allocator import SCRATCH
+from gpt2.inference.continuous_batch.paged_cache import PagedKVCache
 
 TINY = dict(vocab_size=64, n_layer=2, n_head=2, n_embd=32, block_size=32,
             dropout=0.0, bias=True)

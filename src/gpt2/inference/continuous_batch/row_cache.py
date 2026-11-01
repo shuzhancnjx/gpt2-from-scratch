@@ -1,6 +1,6 @@
 """A KV cache whose rows advance independently.
 
-gpt2/inference/kv_cache.py keeps one scalar write pointer for the whole batch.
+gpt2/inference/static_batch/kv_cache.py keeps one scalar write pointer for the whole batch.
 That works because left-padding aligns every row's last real token at the same
 column, so all rows step together.
 

@@ -151,7 +151,7 @@ class Engine(threading.Thread):
                 continue
             seconds = time.perf_counter() - t0
             self.runs += 1
-            tokens = sum(len(g) for g in self.sched.generated.values())
+            tokens = sum(len(g) for g in self.sched.generated_cpu.values())
             log.info('batch %d done in %.2fs: %d tokens (%.1f tok/s), %d decode steps, '
                      'peak %d blocks / %d requests resident',
                      self.runs, seconds, tokens, tokens / seconds, self.sched.decode_steps,
@@ -161,7 +161,7 @@ class Engine(threading.Thread):
                 job['raw'] = out[len(job['prompt']):]
                 job['reply'] = cut_reply(job['raw'])
                 job['stats'] = dict(batch_size=len(batch), seconds=round(seconds, 2),
-                                    tokens=len(self.sched.generated.get(i, [])),
+                                    tokens=len(self.sched.generated_cpu.get(i, [])),
                                     resident=self.sched.peak_active,
                                     blocks=self.sched.peak_blocks)
                 job['done'].set()

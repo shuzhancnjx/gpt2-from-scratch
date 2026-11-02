@@ -34,7 +34,7 @@ class RowKVCache:
         self.device = device
 
         # One write pointer per row -- the whole point of this class.
-        self.pos = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self.pos_gpu = torch.zeros(batch_size, dtype=torch.long, device=device)
 
     # -- writes ------------------------------------------------------------
 
@@ -53,7 +53,7 @@ class RowKVCache:
     def _prefill(self, layer_idx, key, value, row):
         T = key.size(2)
         assert key.size(0) == 1, f'prefill writes one row, got a batch of {key.size(0)}'
-        assert int(self.pos[row]) == 0, f'row {row} is not free (pos={int(self.pos[row])})'
+        assert int(self.pos_gpu[row]) == 0, f'row {row} is not free (pos={int(self.pos_gpu[row])})'
         assert T <= self.width, f'prompt of {T} exceeds cache width {self.width}'
 
         # slice(), not fancy indexing: basic slicing gives a VIEW, so attention
@@ -71,8 +71,8 @@ class RowKVCache:
         rows = torch.arange(key.size(0), device=key.device)
         # Advanced indexing on dims 0 and 2 with a slice between: both index
         # tensors live on the device, so this stays capturable in a CUDA graph.
-        self.key[layer_idx][rows, :, self.pos] = key[:, :, 0, :]
-        self.value[layer_idx][rows, :, self.pos] = value[:, :, 0, :]
+        self.key[layer_idx][rows, :, self.pos_gpu] = key[:, :, 0, :]
+        self.value[layer_idx][rows, :, self.pos_gpu] = value[:, :, 0, :]
         return self.key[layer_idx], self.value[layer_idx]
 
     # -- bookkeeping -------------------------------------------------------
@@ -84,24 +84,24 @@ class RowKVCache:
         n_layer times per forward, so row pointers would jump by n_layer * T.
         """
         if row is not None:
-            self.pos[row] = T                      # prefill starts from 0
+            self.pos_gpu[row] = T                      # prefill starts from 0
         elif active is not None:
-            self.pos += active.long() * T          # only rows still generating
+            self.pos_gpu += active.long() * T          # only rows still generating
         else:
-            self.pos += T
+            self.pos_gpu += T
 
     def seq_len(self, row=None):
-        return int(self.pos[row]) if row is not None else self.pos
+        return int(self.pos_gpu[row]) if row is not None else self.pos_gpu
 
     def release(self, row):
         """Retire a row so a queued request can take its slot."""
-        self.pos[row] = 0
+        self.pos_gpu[row] = 0
         for k, v in zip(self.key, self.value):
             k[row].zero_()
             v[row].zero_()
 
     def reset(self):
-        self.pos.zero_()
+        self.pos_gpu.zero_()
         for k, v in zip(self.key, self.value):
             k.zero_()
             v.zero_()

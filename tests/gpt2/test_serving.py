@@ -38,7 +38,7 @@ def test_prefill_writes_one_row_from_slot_zero(cache, config):
     cache.update(0, kv(1, 5, config, 1.0), kv(1, 5, config, 1.0), row=1)
     cache.advance(5, row=1)
 
-    assert cache.pos.tolist() == [0, 5, 0], 'only row 1 should have advanced'
+    assert cache.pos_gpu.tolist() == [0, 5, 0], 'only row 1 should have advanced'
     assert torch.all(cache.key[0][1, :, :5] == 1.0)
     assert torch.all(cache.key[0][1, :, 5:] == 0.0), 'wrote past the prompt'
     assert torch.all(cache.key[0][0] == 0.0), 'row 0 was touched'
@@ -65,7 +65,7 @@ def test_prefill_into_an_occupied_row_is_rejected(cache, config):
 
 def test_decode_writes_each_row_at_its_own_pos(cache, config):
     """The core of continuous batching: rows sit at different lengths."""
-    cache.pos = torch.tensor([2, 7, 0])
+    cache.pos_gpu = torch.tensor([2, 7, 0])
 
     cache.update(0, kv(3, 1, config, 9.0), kv(3, 1, config, 9.0))
 
@@ -76,16 +76,16 @@ def test_decode_writes_each_row_at_its_own_pos(cache, config):
 
 
 def test_decode_advances_every_row_by_one(cache):
-    cache.pos = torch.tensor([2, 7, 0])
+    cache.pos_gpu = torch.tensor([2, 7, 0])
     cache.advance(1)
-    assert cache.pos.tolist() == [3, 8, 1]
+    assert cache.pos_gpu.tolist() == [3, 8, 1]
 
 
 def test_advance_skips_inactive_rows(cache):
     """A retired slot awaiting a new request must not drift forward."""
-    cache.pos = torch.tensor([2, 7, 0])
+    cache.pos_gpu = torch.tensor([2, 7, 0])
     cache.advance(1, active=torch.tensor([True, False, True]))
-    assert cache.pos.tolist() == [3, 7, 1]
+    assert cache.pos_gpu.tolist() == [3, 7, 1]
 
 
 # -- retirement --------------------------------------------------------------
@@ -97,7 +97,7 @@ def test_release_frees_one_row_only(cache, config):
 
     cache.release(1)
 
-    assert cache.pos.tolist() == [4, 0, 4]
+    assert cache.pos_gpu.tolist() == [4, 0, 4]
     assert torch.all(cache.key[0][1] == 0.0), 'row 1 should be cleared'
     assert torch.all(cache.key[0][0, :, :4] == 1.0), 'row 0 was disturbed'
     assert torch.all(cache.key[0][2, :, :4] == 3.0), 'row 2 was disturbed'
@@ -111,7 +111,7 @@ def test_released_row_accepts_a_new_request(cache, config):
     cache.update(0, kv(1, 2, config, 5.0), kv(1, 2, config, 5.0), row=0)
     cache.advance(2, row=0)
 
-    assert int(cache.pos[0]) == 2
+    assert int(cache.pos_gpu[0]) == 2
     assert torch.all(cache.key[0][0, :, :2] == 5.0)
     assert torch.all(cache.key[0][0, :, 2:] == 0.0), 'stale KV from the previous request'
 
@@ -124,7 +124,7 @@ def test_all_layers_stay_in_lockstep(cache, config):
         cache.update(layer, kv(1, 3, config, 1.0), kv(1, 3, config, 1.0), row=0)
     cache.advance(3, row=0)
 
-    assert int(cache.pos[0]) == 3, 'pos moved per layer instead of per forward'
+    assert int(cache.pos_gpu[0]) == 3, 'pos moved per layer instead of per forward'
     for layer in range(len(cache.key)):
         assert torch.all(cache.key[layer][0, :, :3] == 1.0), f'layer {layer} wrote nothing'
         assert torch.all(cache.key[layer][0, :, 3:] == 0.0), f'layer {layer} wrote past 3'
@@ -187,8 +187,8 @@ def test_slots_are_reused_across_requests(sched_parts):
     out = sched.run(PROMPTS * 2, max_new_tokens=4)
 
     assert len(out) == 8
-    assert not bool(sched.active.any()), 'slots left occupied after the run'
-    assert sched.cache.pos.tolist() == [0, 0], 'released rows should be back at zero'
+    assert not bool(sched.active_gpu.any()), 'slots left occupied after the run'
+    assert sched.cache.pos_gpu.tolist() == [0, 0], 'released rows should be back at zero'
 
 
 def test_batch_width_does_not_change_output(sched_parts):
@@ -233,8 +233,8 @@ def test_mask_covers_written_slots_and_blanks_idle_rows(sched_parts):
     model, enc, cfg = sched_parts
 
     sched = Scheduler(model, enc, cfg, batch_size=3, max_tokens=6)
-    sched.cache.pos = torch.tensor([2, 4, 0])
-    sched.active = torch.tensor([True, True, False])
+    sched.cache.pos_gpu = torch.tensor([2, 4, 0])
+    sched.active_gpu = torch.tensor([True, True, False])
 
     m = sched._mask().int().tolist()
 
@@ -261,8 +261,8 @@ def test_decode_feeds_per_row_positions_and_leaves_idle_slots_alone(sched_parts)
         # cache_row, not idx width: a one-token prompt prefills with T == 1 too
         if kwargs.get('cache_row') is None:        # decode, not prefill
             seen.append((kwargs['pos_ids'].flatten().tolist(),
-                         sched.cache.pos.tolist(),
-                         sched.active.tolist()))
+                         sched.cache.pos_gpu.tolist(),
+                         sched.active_gpu.tolist()))
         return real(idx, **kwargs)
 
     sched.model = spy

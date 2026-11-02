@@ -108,9 +108,9 @@ def test_every_block_is_returned_after_a_run(parts):
     sched.run(PROMPTS * 2, max_new_tokens=4)
 
     assert sched.allocator.num_free == sched.allocator.capacity, 'blocks leaked'
-    assert sched.num_active == 0
-    assert all(b == [] for b in sched.row_blocks)
-    assert not bool(sched.active.any())
+    assert sched.num_active_cpu == 0
+    assert all(b == [] for b in sched.row_blocks_cpu)
+    assert not bool(sched.active_gpu.any())
 
 
 def test_two_runs_in_a_row_give_identical_results(parts):
@@ -130,11 +130,11 @@ def test_no_block_is_owned_by_two_live_requests(parts):
     checked = []
 
     def checking_decode(sampler):
-        live = [b for row in range(sched.B) if sched.row_active[row] for b in sched.row_blocks[row]]
+        live = [b for row in range(sched.B) if sched.active_cpu[row] for b in sched.row_blocks_cpu[row]]
         assert len(live) == len(set(live)), f'a block is owned twice: {live}'
         for row in range(sched.B):
-            n = len(sched.row_blocks[row])
-            assert sched.cache.block_table[row, :n].tolist() == sched.row_blocks[row], \
+            n = len(sched.row_blocks_cpu[row])
+            assert sched.cache.block_table_gpu[row, :n].tolist() == sched.row_blocks_cpu[row], \
                 f'device block table out of sync for row {row}'
         checked.append(True)
         real_decode(sampler)
@@ -202,3 +202,28 @@ def test_a_wait_is_logged_once_not_every_step(parts, caplog):
     waits = [r.getMessage() for r in caplog.records if r.getMessage().startswith('wait')]
     assert waits, 'a tight pool should make requests wait'
     assert len(waits) == len(set(waits)), 'the same wait was logged repeatedly'
+
+
+# -- CUDA graph decode ------------------------------------------------------------
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA graphs need CUDA')
+def test_graph_decode_matches_eager(parts):
+    """Requests join and leave mid-run (more prompts than rows): replays must pick up
+    each newly admitted row through the in-place buffers."""
+    model, enc, cfg = parts
+    model = model.to('cuda')
+    prompts = PROMPTS * 3
+    eager = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W, device='cuda')
+    graphed = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W, device='cuda')
+    graphed.capture_graph()
+    assert graphed.run(prompts, max_new_tokens=6) == eager.run(prompts, max_new_tokens=6)
+    assert graphed.allocator.num_free == graphed.allocator.capacity
+
+
+def test_graph_refuses_a_different_sampler(parts):
+    """The graph replays the sampler it recorded; asking for another must fail loudly."""
+    model, enc, cfg = parts
+    s = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W)
+    s.graph, s.graph_sampler = object(), (lambda logits: logits.argmax(-1, keepdim=True))
+    with pytest.raises(ValueError, match='different sampler'):
+        s.run(PROMPTS, max_new_tokens=2, sampler=lambda logits: logits.argmax(-1, keepdim=True))

@@ -16,7 +16,7 @@ same shape while the work in them stays real.
 Two things fall out of RowKVCache's per-row pointers and are worth noticing:
 
   - No left-padding. Each row owns slots [0, pos[r]) of its own cache row, so a
-    slot index is a position again and pos_ids is just cache.pos.
+    slot index is a position again and pos_ids is just cache.pos_gpu.
 
   - The mask is derived, not maintained. Recomputing it from pos each step means
     the mask and the cache cannot drift out of sync, which is the failure mode
@@ -43,10 +43,10 @@ class Scheduler:
         self.W = max_tokens if max_tokens is not None else config.block_size
         self.cache = RowKVCache(batch_size, device, config, max_tokens=self.W, dtype=dtype)
 
-        self.active = torch.zeros(self.B, dtype=torch.bool, device=device)
-        self.next_token = torch.zeros(self.B, 1, dtype=torch.long, device=device)
-        self.slot_req = [None] * self.B          # which request occupies each slot
-        self.generated = {}                      # request id -> list[int]
+        self.active_gpu = torch.zeros(self.B, dtype=torch.bool, device=device)   # read by the model (mask, advance)
+        self.next_token_gpu = torch.zeros(self.B, 1, dtype=torch.long, device=device)
+        self.slot_req_cpu = [None] * self.B          # which request occupies each slot
+        self.generated_cpu = {}                      # request id -> list[int]
 
     # -- public ------------------------------------------------------------
 
@@ -60,9 +60,9 @@ class Scheduler:
         results = {}
 
         self._reset()
-        while queue or bool(self.active.any()):
+        while queue or bool(self.active_gpu.any()):
             self._admit(queue, prompt_ids, sampler, max_new_tokens)
-            if bool(self.active.any()):
+            if bool(self.active_gpu.any()):
                 self._decode(sampler)
             self._retire(results, prompt_ids, max_new_tokens)
 
@@ -77,7 +77,7 @@ class Scheduler:
         no padding is needed anywhere in this file.
         """
         for row in range(self.B):
-            if self.active[row] or not queue:
+            if self.active_gpu[row] or not queue:
                 continue
 
             req, _ = queue.popleft()
@@ -96,39 +96,39 @@ class Scheduler:
                                    attn_mask=mask, cache_row=row)
 
             tok = sampler(logits[:, -1, :self.enc.n_vocab])
-            self.next_token[row] = tok
-            self.active[row] = True
-            self.slot_req[row] = req
-            self.generated[req] = [int(tok)]
+            self.next_token_gpu[row] = tok
+            self.active_gpu[row] = True
+            self.slot_req_cpu[row] = req
+            self.generated_cpu[req] = [int(tok)]
 
     def _decode(self, sampler):
         """One token for every row, each writing at its own pos."""
-        logits, _ = self.model(self.next_token, kv_cache=self.cache,
-                               pos_ids=self.cache.pos.unsqueeze(1),
-                               attn_mask=self._mask(), cache_active=self.active)
+        logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
+                               pos_ids=self.cache.pos_gpu.unsqueeze(1),
+                               attn_mask=self._mask(), cache_active=self.active_gpu)
 
         tok = sampler(logits[:, -1, :self.enc.n_vocab])
-        self.next_token = tok
+        self.next_token_gpu = tok
 
         for row in range(self.B):
-            if self.active[row]:
-                self.generated[self.slot_req[row]].append(int(tok[row]))
+            if self.active_gpu[row]:
+                self.generated_cpu[self.slot_req_cpu[row]].append(int(tok[row]))
 
     def _retire(self, results, prompt_ids, max_new_tokens):
         eot = self.enc.eot_token
         for row in range(self.B):
-            if not self.active[row]:
+            if not self.active_gpu[row]:
                 continue
 
-            req = self.slot_req[row]
-            gen = self.generated[req]
-            full = int(self.cache.pos[row]) + 1 >= self.W      # no room for another write
+            req = self.slot_req_cpu[row]
+            gen = self.generated_cpu[req]
+            full = int(self.cache.pos_gpu[row]) + 1 >= self.W      # no room for another write
 
             if gen[-1] == eot or len(gen) >= max_new_tokens or full:
                 results[req] = gen
                 self.cache.release(row)
-                self.active[row] = False
-                self.slot_req[row] = None
+                self.active_gpu[row] = False
+                self.slot_req_cpu[row] = None
 
     # -- helpers -----------------------------------------------------------
 
@@ -139,11 +139,11 @@ class Scheduler:
         to see itself. `& active` blanks free slots, whose rows are all zeros.
         """
         cols = torch.arange(self.W, device=self.device)
-        return (cols <= self.cache.pos.unsqueeze(1)) & self.active.unsqueeze(1)
+        return (cols <= self.cache.pos_gpu.unsqueeze(1)) & self.active_gpu.unsqueeze(1)
 
     def _reset(self):
         self.cache.reset()
-        self.active.zero_()
-        self.next_token.zero_()
-        self.slot_req = [None] * self.B
-        self.generated = {}
+        self.active_gpu.zero_()
+        self.next_token_gpu.zero_()
+        self.slot_req_cpu = [None] * self.B
+        self.generated_cpu = {}

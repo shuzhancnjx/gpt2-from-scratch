@@ -55,7 +55,7 @@ def timed_run(sched, prompts, max_new, device):
     synchronize(device)
     seconds = time.perf_counter() - t0
     peak = torch.cuda.max_memory_allocated() if device.startswith('cuda') else None
-    generated = sum(len(g) for g in sched.generated.values())
+    generated = sum(len(g) for g in sched.generated_cpu.values())
     return seconds, generated, peak
 
 

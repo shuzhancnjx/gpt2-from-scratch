@@ -61,7 +61,7 @@ def test_decode_writes_each_row_at_its_own_pos(config, device):
     cache = make_cache(config, device)
     cache.set_blocks(0, [2, 5])
     cache.set_blocks(2, [9])
-    cache.pos = torch.tensor([5, 0, 2], device=device)     # row 0 in its 2nd block
+    cache.pos_gpu = torch.tensor([5, 0, 2], device=device)     # row 0 in its 2nd block
 
     cache.update(0, tokens(3, 1, config, 1, device), tokens(3, 1, config, 1, device))
 
@@ -87,7 +87,7 @@ def test_idle_rows_write_only_to_scratch(config, device):
     """Decode writes every row; rows with no blocks must land in scratch and nowhere else."""
     cache = make_cache(config, device)
     cache.set_blocks(1, [6])
-    cache.pos = torch.tensor([0, 1, 0], device=device)      # rows 0 and 2 idle
+    cache.pos_gpu = torch.tensor([0, 1, 0], device=device)      # rows 0 and 2 idle
 
     cache.update(0, tokens(3, 1, config, 1, device), tokens(3, 1, config, 1, device))
 
@@ -103,7 +103,7 @@ def test_all_layers_write_at_the_same_slots(config, device):
         cache.update(layer, k, k, row=0)
     cache.advance(3, row=0)
 
-    assert int(cache.pos[0]) == 3, 'pos moved per layer instead of per forward'
+    assert int(cache.pos_gpu[0]) == 3, 'pos moved per layer instead of per forward'
     for layer in range(config.n_layer):
         assert torch.all(cache.key[layer][4, :3] != 0), f'layer {layer} wrote nothing'
         assert torch.all(cache.key[layer][4, 3:] == 0), f'layer {layer} wrote past 3'
@@ -142,7 +142,7 @@ def test_gather_matches_row_cache(config, device):
 
     assert got_paged[0].shape == got_row[0].shape == (3, config.n_head, W, config.n_embd // config.n_head)
     for row in (0, 2):
-        n = int(paged.pos[row])                           # written history; beyond it is masked
+        n = int(paged.pos_gpu[row])                           # written history; beyond it is masked
         assert torch.equal(got_paged[0][row, :, :n], got_row[0][row, :, :n]), f'row {row} K differs'
         assert torch.equal(got_paged[1][row, :, :n], got_row[1][row, :, :n]), f'row {row} V differs'
 
@@ -157,11 +157,11 @@ def test_prefill_gather_returns_only_that_row(config, device):
 def test_release_points_the_row_back_at_scratch(config, device):
     cache = make_cache(config, device)
     cache.set_blocks(1, [4, 6])
-    cache.pos[1] = 5
+    cache.pos_gpu[1] = 5
     cache.release(1)
 
-    assert int(cache.pos[1]) == 0
-    assert torch.all(cache.block_table[1] == SCRATCH)
+    assert int(cache.pos_gpu[1]) == 0
+    assert torch.all(cache.block_table_gpu[1] == SCRATCH)
 
 
 def test_too_many_blocks_for_a_row_is_rejected(config):

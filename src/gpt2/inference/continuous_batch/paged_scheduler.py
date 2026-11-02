@@ -14,7 +14,7 @@ is admitted, so nothing can run out mid-generation and no preemption is needed.
 (On-demand growth -- one block each time pos crosses a block boundary -- is the
 next step, and is what makes preemption necessary.)
 
-Decisions use host mirrors (row_blocks, row_len, row_active, num_active), so the
+Decisions use host mirrors (row_blocks_cpu, row_len_cpu, active_cpu, num_active_cpu), so the
 scheduler never reads GPU tensors to decide anything.
 
 Logging: every admit, wait and retire is reported through the standard `logging`
@@ -25,6 +25,7 @@ so they never force a GPU sync.
 """
 
 import logging
+from collections import deque
 from math import ceil
 
 import torch
@@ -61,21 +62,49 @@ class PagedScheduler(Scheduler):
                                   self.W // block_size, device, dtype)
 
         # device state the inherited decode path uses
-        self.active = torch.zeros(self.B, dtype=torch.bool, device=device)
-        self.next_token = torch.zeros(self.B, 1, dtype=torch.long, device=device)
-        self.slot_req = [None] * self.B
-        self.generated = {}
+        self.active_gpu = torch.zeros(self.B, dtype=torch.bool, device=device)   # read by the model (mask, advance)
+        self.next_token_gpu = torch.zeros(self.B, 1, dtype=torch.long, device=device)
+        self.slot_req_cpu = [None] * self.B
+        self.generated_cpu = {}
 
         # host mirrors: every scheduling decision reads these, never the GPU
-        self.row_blocks = [[] for _ in range(self.B)]
-        self.row_len = [0] * self.B
-        self.row_active = [False] * self.B
-        self.num_active = 0
+        self.row_blocks_cpu = [[] for _ in range(self.B)]
+        self.row_len_cpu = [0] * self.B
+        self.active_cpu = [False] * self.B                 # CPU mirror of active_gpu: every decision reads this
+        self.num_active_cpu = 0
 
         self.peak_active = 0                      # most requests resident at once
         self.peak_blocks = 0                      # most blocks in use at once
         self.decode_steps = 0
         self._waiting_req = None                  # log a wait once, not every step
+        self.graph = None                         # set by capture_graph(); None = eager decode
+        self.graph_sampler = None                 # the sampler recorded inside the graph
+
+    # -- the main loop: decide from host mirrors --------------------------------
+
+    @torch.inference_mode()
+    def run(self, prompts, max_new_tokens=32, sampler=None):
+        """Same loop as Scheduler.run, but every decision reads a host int, never the GPU."""
+        if self.graph is not None:
+            # the graph replays the sampler it was captured with; it cannot switch
+            if sampler is not None and sampler is not self.graph_sampler:
+                raise ValueError('this graph was captured with a different sampler: pass the same '
+                                 'one (or none), or capture_graph(sampler) again')
+            sampler = self.graph_sampler
+        sampler = sampler or _greedy
+
+        queue = deque(enumerate(prompts))
+        prompt_ids = [self.enc.encode(p) for p in prompts]
+        results = {}
+
+        self._reset()
+        while queue or self.num_active_cpu:            # was bool(self.active_gpu.any()): a sync
+            self._admit(queue, prompt_ids, sampler, max_new_tokens)
+            if self.num_active_cpu:                    # was a second sync
+                self._decode(sampler)
+            self._retire(results, prompt_ids, max_new_tokens)
+
+        return [prompts[i] + self.enc.decode(results[i]) for i in range(len(prompts))]
 
     # -- the three operations --------------------------------------------------
 
@@ -84,7 +113,7 @@ class PagedScheduler(Scheduler):
         for row in range(self.B):
             if not queue:
                 return
-            if self.row_active[row]:
+            if self.active_cpu[row]:
                 continue
 
             req, _ = queue[0]
@@ -103,9 +132,9 @@ class PagedScheduler(Scheduler):
             # Headroom only matters when something is running that could free blocks.
             # With nothing active the whole pool is free and the check above guarantees
             # the request fits -- so ignoring the watermark here prevents a spin.
-            headroom = self.watermark if self.num_active else 0
+            headroom = self.watermark if self.num_active_cpu else 0
             if self.allocator.num_free - need < headroom:
-                if not self.num_active:           # unreachable given the checks above
+                if not self.num_active_cpu:           # unreachable given the checks above
                     raise RuntimeError('no progress: the head request cannot be admitted '
                                        'into an empty pool')
                 if self._waiting_req != req:
@@ -117,7 +146,7 @@ class PagedScheduler(Scheduler):
 
             queue.popleft()
             blocks = self.allocator.allocate(need)
-            self.row_blocks[row] = blocks
+            self.row_blocks_cpu[row] = blocks
             self.cache.set_blocks(row, blocks)
 
             # prefill -- identical to Scheduler._admit
@@ -128,73 +157,132 @@ class PagedScheduler(Scheduler):
                                    attn_mask=mask, cache_row=row)
 
             tok = sampler(logits[:, -1, :self.enc.n_vocab])
-            self.next_token[row] = tok
-            self.active[row] = True
-            self.slot_req[row] = req
-            self.generated[req] = [int(tok)]
+            self.next_token_gpu[row] = tok
+            self.active_gpu[row] = True
+            self.slot_req_cpu[row] = req
+            self.generated_cpu[req] = [int(tok)]
 
-            self.row_active[row] = True
-            self.row_len[row] = L
-            self.num_active += 1
-            self.peak_active = max(self.peak_active, self.num_active)
+            self.active_cpu[row] = True
+            self.row_len_cpu[row] = L
+            self.num_active_cpu += 1
+            self.peak_active = max(self.peak_active, self.num_active_cpu)
             self.peak_blocks = max(self.peak_blocks,
                                    self.allocator.capacity - self.allocator.num_free)
             self._waiting_req = None
             log.info('admit  req %d -> row %d: prompt %d tokens, %d blocks %s, '
                      '%d/%d blocks free, %d active',
                      req, row, L, need, _short(blocks), self.allocator.num_free,
-                     self.allocator.capacity, self.num_active)
+                     self.allocator.capacity, self.num_active_cpu)
 
     def _decode(self, sampler):
-        super()._decode(sampler)
-        self.decode_steps += 1
+        """One token for every row. Graph replay if captured, else the eager forward."""
+        if self.graph is not None:
+            self.graph.replay()                       # one launch replaces hundreds
+        else:
+            logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
+                                   pos_ids=self.cache.pos_gpu.unsqueeze(1),
+                                   attn_mask=self._mask(), cache_active=self.active_gpu)
+            tok = sampler(logits[:, -1, :self.enc.n_vocab])    # (B, 1), still on the GPU
+            self.next_token_gpu.copy_(tok)                # in place: the same buffer every step
+        self._record_tokens()
+
+    def _record_tokens(self):
+        """The one device -> host copy per step, then host bookkeeping only."""
+        toks = self.next_token_gpu.view(-1).tolist()      # THE sync: all B tokens in one copy
         for row in range(self.B):
-            if self.row_active[row]:
-                self.row_len[row] += 1                # one token written per active row
+            if self.active_cpu[row]:                  # host mirror, was `if self.active_gpu[row]`
+                self.generated_cpu[self.slot_req_cpu[row]].append(toks[row])
+                self.row_len_cpu[row] += 1                # one token written per active row
+        self.decode_steps += 1
         if log.isEnabledFor(logging.DEBUG):
             log.debug('decode step %d: %d active rows, lengths %s',
-                      self.decode_steps, self.num_active,
-                      [self.row_len[r] for r in range(self.B) if self.row_active[r]])
+                      self.decode_steps, self.num_active_cpu,
+                      [self.row_len_cpu[r] for r in range(self.B) if self.active_cpu[r]])
 
     def _retire(self, results, prompt_ids, max_new_tokens):
         eot = self.enc.eot_token
         for row in range(self.B):
-            if not self.row_active[row]:
+            if not self.active_cpu[row]:
                 continue
 
-            req = self.slot_req[row]
-            gen = self.generated[req]
-            full = self.row_len[row] + 1 >= self.W      # host mirror, not cache.pos
+            req = self.slot_req_cpu[row]
+            gen = self.generated_cpu[req]
+            full = self.row_len_cpu[row] + 1 >= self.W      # host mirror, not cache.pos_gpu
 
             if gen[-1] == eot or len(gen) >= max_new_tokens or full:
                 results[req] = gen
                 reason = ('end-of-text' if gen[-1] == eot else
                           'max_new_tokens' if len(gen) >= max_new_tokens else 'cache width')
-                freed = len(self.row_blocks[row])
-                self.allocator.free(self.row_blocks[row])
-                self.row_blocks[row] = []
+                freed = len(self.row_blocks_cpu[row])
+                self.allocator.free(self.row_blocks_cpu[row])
+                self.row_blocks_cpu[row] = []
                 self.cache.release(row)               # back to scratch; pool not cleared
-                self.active[row] = False
-                self.slot_req[row] = None
-                self.row_active[row] = False
-                self.row_len[row] = 0
-                self.num_active -= 1
+                self.active_gpu[row] = False
+                self.slot_req_cpu[row] = None
+                self.active_cpu[row] = False
+                self.row_len_cpu[row] = 0
+                self.num_active_cpu -= 1
                 log.info('retire req %d <- row %d: %s after %d tokens, freed %d blocks, '
                          '%d/%d blocks free, %d active',
                          req, row, reason, len(gen), freed, self.allocator.num_free,
-                         self.allocator.capacity, self.num_active)
+                         self.allocator.capacity, self.num_active_cpu)
 
     def _reset(self):
         super()._reset()                              # cache, active, next_token, slot_req, generated
         self.allocator.reset()
-        self.row_blocks = [[] for _ in range(self.B)]
-        self.row_len = [0] * self.B
-        self.row_active = [False] * self.B
-        self.num_active = 0
+        self.row_blocks_cpu = [[] for _ in range(self.B)]
+        self.row_len_cpu = [0] * self.B
+        self.active_cpu = [False] * self.B
+        self.num_active_cpu = 0
         self.peak_active = 0
         self.peak_blocks = 0
         self.decode_steps = 0
         self._waiting_req = None
+
+    # -- CUDA graph: record the decode step once, replay it every step -----------
+
+    def capture_graph(self, sampler=None):
+        """Record one decode step -- forward, mask and `sampler` (default greedy). Call
+        once after __init__, on CUDA. run() then always uses this sampler.
+
+        The sampler must be capturable: tensor ops only, no reads back to the CPU.
+        topk / softmax / multinomial (scripts/chat_server.py make_sampler) qualify.
+
+        Safe to capture with no requests: every row is inactive, so the forward writes
+        only to the scratch block and advance() adds 0 to pos. Prefill stays eager
+        (prompt lengths vary), but writes the same pool, table and pos buffers the
+        graph reads -- so a replay sees newly admitted rows automatically.
+        """
+        assert str(self.device).startswith('cuda'), 'CUDA graphs need a CUDA device'
+        self.graph_sampler = sampler or _greedy
+        with torch.inference_mode():
+            self._reset()
+            # warm up on a side stream: cuBLAS/SDPA choose kernels and allocate
+            # workspaces BEFORE capture, so no first-time setup is recorded
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                for _ in range(3):
+                    self._graph_body()
+            torch.cuda.current_stream().wait_stream(side)
+            self._reset()                             # undo the warm-up, in place
+
+            self.graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self.graph):        # record, don't run
+                self._graph_body()
+
+    def _graph_body(self):
+        """The captured work. Reads and writes only fixed buffers: next_token, active,
+        cache.pos_gpu, cache.block_table_gpu and the K/V pools -- all updated in place."""
+        logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
+                               pos_ids=self.cache.pos_gpu.unsqueeze(1),
+                               attn_mask=self._mask(), cache_active=self.active_gpu)
+        tok = self.graph_sampler(logits[:, -1, :self.enc.n_vocab])        # on the GPU
+        self.next_token_gpu.copy_(tok)
+
+
+def _greedy(logits):
+    return logits.argmax(-1, keepdim=True)
 
 
 def _short(blocks, n=6):

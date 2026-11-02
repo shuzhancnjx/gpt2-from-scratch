@@ -74,7 +74,7 @@ def breakdown(sched, prompts, max_new, device):
     sched.run(prompts, max_new_tokens=max_new)
     synchronize(device)
     wall = time.perf_counter() - t0
-    generated = sum(len(g) for g in sched.generated.values())
+    generated = sum(len(g) for g in sched.generated_cpu.values())
     return dict(wall=wall, tok_s=generated / wall, prefill_share=t['admit'] / wall,
                 decode_steps=t['decode_steps'],
                 ms_per_step=1e3 * t['decode'] / max(t['decode_steps'], 1))

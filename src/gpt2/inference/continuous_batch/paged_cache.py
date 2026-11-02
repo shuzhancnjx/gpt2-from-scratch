@@ -48,9 +48,9 @@ class PagedKVCache:
         self.key = [torch.zeros(shape, device=device, dtype=dtype) for _ in range(config.n_layer)]
         self.value = [torch.zeros(shape, device=device, dtype=dtype) for _ in range(config.n_layer)]
 
-        self.block_table = torch.full((max_seqs, max_blocks_per_seq), SCRATCH,
+        self.block_table_gpu = torch.full((max_seqs, max_blocks_per_seq), SCRATCH,
                                       dtype=torch.long, device=device)
-        self.pos = torch.zeros(max_seqs, dtype=torch.long, device=device)
+        self.pos_gpu = torch.zeros(max_seqs, dtype=torch.long, device=device)
 
         self.num_blocks = num_blocks
         self.block_size = block_size
@@ -71,11 +71,11 @@ class PagedKVCache:
         if len(blocks) > self.max_blocks_per_seq:
             raise ValueError(f'{len(blocks)} blocks exceed max_blocks_per_seq={self.max_blocks_per_seq}')
         padded = list(blocks) + [SCRATCH] * (self.max_blocks_per_seq - len(blocks))
-        self.block_table[row] = torch.tensor(padded, dtype=torch.long, device=self.device)
+        self.block_table_gpu[row] = torch.tensor(padded, dtype=torch.long, device=self.device)
 
     def slots(self, rows, positions):
         """Flat pool index for each (row, position) pair -- tensors in, tensor out."""
-        physical = self.block_table[rows, positions // self.block_size]
+        physical = self.block_table_gpu[rows, positions // self.block_size]
         return physical * self.block_size + positions % self.block_size
 
     # -- writes and reads ------------------------------------------------------
@@ -91,13 +91,13 @@ class PagedKVCache:
 
         if row is not None:
             assert B == 1, f'prefill writes one row, got a batch of {B}'
-            positions = self.pos[row] + torch.arange(T, device=self.device)
+            positions = self.pos_gpu[row] + torch.arange(T, device=self.device)
             rows = torch.full((T,), row, dtype=torch.long, device=self.device)
             sel = slice(row, row + 1)
         else:
             assert T == 1, f'decode writes one token per row, got {T}'
             rows = torch.arange(B, device=self.device)
-            positions = self.pos[:B]
+            positions = self.pos_gpu[:B]
             sel = slice(0, B)
 
         slots = self.slots(rows, positions)                       # (B*T,), in (row, t) order
@@ -117,7 +117,7 @@ class PagedKVCache:
 
     def _gather(self, pool, sel):
         """The rows' blocks in logical order → (B, H, W, D). A copy (see module doc)."""
-        table = self.block_table[sel]                              # (B, max_blocks)
+        table = self.block_table_gpu[sel]                              # (B, max_blocks)
         B = table.shape[0]
         blocks = pool[table]                                       # (B, max_blocks, bs, H, D)
         return blocks.reshape(B, self.width, *pool.shape[2:]).transpose(1, 2)
@@ -127,21 +127,21 @@ class PagedKVCache:
     def advance(self, T, row=None, active=None):
         """Move the write pointer once per forward, never per layer."""
         if row is not None:
-            self.pos[row] = T                      # prefill starts from 0
+            self.pos_gpu[row] = T                      # prefill starts from 0
         elif active is not None:
-            self.pos += active.long() * T          # only rows still generating
+            self.pos_gpu += active.long() * T          # only rows still generating
         else:
-            self.pos += T
+            self.pos_gpu += T
 
     def seq_len(self, row=None):
-        return int(self.pos[row]) if row is not None else self.pos
+        return int(self.pos_gpu[row]) if row is not None else self.pos_gpu
 
     def release(self, row):
         """Point the row back at scratch. The pool is NOT cleared: stale blocks are
         harmless because the mask hides everything at or past pos."""
-        self.pos[row] = 0
-        self.block_table[row] = SCRATCH
+        self.pos_gpu[row] = 0
+        self.block_table_gpu[row] = SCRATCH
 
     def reset(self):
-        self.pos.zero_()
-        self.block_table.fill_(SCRATCH)
+        self.pos_gpu.zero_()
+        self.block_table_gpu.fill_(SCRATCH)

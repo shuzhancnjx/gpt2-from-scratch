@@ -46,6 +46,8 @@ src/                       one top-level package per layer (no umbrella package)
         paged_attention.py     Triton decode attention over the block table (CUDA)
   app/
     llm.py                 LLM: the front door -- load once, pick an engine, generate()
+    chat_server.py         FastAPI: chat page + OpenAI-compatible /v1 API, one engine thread
+    chat.html              the chat page
 scripts/        prepare_data, train*, plot_loss, eval_checkpoint,
                 sample, chat_server, bench_paging, profile_serving
 notebooks/      loss curve; Colab notebooks for A100 training and GPU profiling
@@ -62,7 +64,7 @@ directly: `from model.gpt2 import GPT`, `from app import LLM`.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[viz,dev]"
+pip install -e ".[viz,serve,dev]"
 ```
 
 ## Getting the data
@@ -209,9 +211,21 @@ fixed buffers the graph reads. Measured on an A100 (32 requests, gather path):
 
 ```bash
 python scripts/sample.py --check "The capital of France is"   # static engine, cached vs uncached
-python scripts/chat_server.py                                 # local chat UI, paged engine
+python scripts/chat_server.py                                 # chat UI + OpenAI API (FastAPI), paged engine
 python scripts/bench_paging.py --graph --kernel               # row vs paged vs graph vs kernel (CUDA)
 ```
+
+The chat server (`pip install -e ".[serve]"`) also speaks the OpenAI API, so standard
+clients work against it; interactive docs are at `http://127.0.0.1:8765/docs`:
+
+```bash
+curl -s localhost:8765/v1/completions -H 'Content-Type: application/json' \
+     -d '{"prompt": "The capital of France is", "max_tokens": 16, "temperature": 0}'
+```
+
+FastAPI handles requests concurrently, but only one engine thread ever touches the
+scheduler: endpoints queue a job and await its result, and the engine runs requests that
+arrive together as one batch (grouped by sampling settings).
 
 How a request moves through a server in general (scheduling, paging, prefix caching)
 is in `docs/request-lifecycle.md`; one forward pass on the GPU, kernel by kernel, is in

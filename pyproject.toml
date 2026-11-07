@@ -12,7 +12,9 @@ dependencies = [
 [project.optional-dependencies]
 # plotting and notebooks are not needed to train
 viz = ["matplotlib", "ipykernel", "jupyterlab"]
-dev = ["pytest"]
+# the chat server and OpenAI-compatible API (app/chat_server.py)
+serve = ["fastapi", "uvicorn"]
+dev = ["pytest", "httpx"]
 
 [build-system]
 requires = ["hatchling"]

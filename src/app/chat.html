@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPT-2 Chat</title>
+<style>
+  :root { --bg:#f7f7f5; --panel:#ffffff; --text:#1d1d1f; --muted:#6e6e73; --line:#e3e3e0;
+          --user:#2f6fde; --user-text:#ffffff; --bot:#efefec; --accent:#2f6fde; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161617; --panel:#1f1f21; --text:#ececee; --muted:#9a9aa0; --line:#323236;
+            --user:#3a78e6; --user-text:#ffffff; --bot:#2a2a2d; --accent:#5b93f0; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; padding:0 16px; height:100vh; display:flex; flex-direction:column; }
+  header { padding:16px 0 10px; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:18px; }
+  .info { color:var(--muted); font-size:12.5px; margin-top:4px; }
+  #log { flex:1; overflow-y:auto; padding:16px 0; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:85%; padding:9px 13px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word; }
+  .user { align-self:flex-end; background:var(--user); color:var(--user-text); border-bottom-right-radius:4px; }
+  .bot  { align-self:flex-start; background:var(--bot); border-bottom-left-radius:4px; }
+  .meta { align-self:flex-start; color:var(--muted); font-size:11.5px; margin:-6px 0 0 6px; }
+  .err  { color:#d33; }
+  form { display:flex; gap:8px; padding:12px 0 16px; border-top:1px solid var(--line); }
+  textarea { flex:1; resize:none; height:46px; padding:11px 12px; border-radius:12px; border:1px solid var(--line);
+             background:var(--panel); color:var(--text); font:inherit; }
+  button { border:0; border-radius:12px; padding:0 16px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>GPT-2 Chat <span style="font-weight:400;color:var(--muted)">· paged engine</span></h1>
+    <div class="info" id="info">loading…</div>
+  </header>
+  <div id="log"></div>
+  <form id="f">
+    <textarea id="q" placeholder="Say something… (Enter to send, Shift+Enter for a newline)"></textarea>
+    <button id="send">Send</button>
+    <button id="newchat" type="button" class="ghost" title="Forget this conversation">New chat</button>
+    <button id="burst" type="button" class="ghost" title="Send this message as 4 separate requests at once, to see them batched">×4</button>
+  </form>
+</div>
+<script>
+const log = document.getElementById('log'), q = document.getElementById('q');
+const send = document.getElementById('send'), burst = document.getElementById('burst');
+const history = [];
+
+function add(cls, text) {
+  const d = document.createElement('div');
+  d.className = cls; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+  return d;
+}
+
+async function ask(messages) {
+  const r = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+                                      body: JSON.stringify({messages})});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+
+function meta(s) {
+  return `batch ${s.batch_size} · ${s.seconds}s · ${s.tokens} tokens · ${s.blocks} blocks in use`;
+}
+
+async function onSend(times) {
+  const text = q.value.trim();
+  if (!text) return;
+  q.value = ''; send.disabled = burst.disabled = true;
+  add('msg user', times > 1 ? `${text}   (×${times})` : text);
+  const turn = [...history, {role:'user', content:text}];
+  const pending = Array.from({length: times}, () => add('msg bot', '…'));
+  const results = await Promise.allSettled(pending.map(() => ask(turn)));
+  results.forEach((res, i) => {
+    if (res.status === 'fulfilled') {
+      pending[i].textContent = res.value.reply;
+      const m = add('meta', meta(res.value.stats));
+      pending[i].after(m);
+    } else {
+      pending[i].textContent = 'Error: ' + res.reason.message;
+      pending[i].classList.add('err');
+    }
+  });
+  const first = results.find(r => r.status === 'fulfilled');
+  history.push({role:'user', content:text});
+  if (first) history.push({role:'assistant', content:first.value.reply});
+  send.disabled = burst.disabled = false; q.focus();
+}
+
+document.getElementById('f').addEventListener('submit', e => { e.preventDefault(); onSend(1); });
+burst.addEventListener('click', () => onSend(4));
+document.getElementById('newchat').addEventListener('click', () => {
+  history.length = 0; log.innerHTML = ''; q.focus();
+});
+q.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(1); } });
+
+fetch('/api/info').then(r => r.json()).then(i => {
+  document.getElementById('info').textContent =
+    `${i.checkpoint} · ${i.device} · max ${i.max_seqs} concurrent · block size ${i.block_size} · ` +
+    `${i.num_blocks} blocks · temperature ${i.temperature} · up to ${i.max_new} new tokens · ` +
+    (i.history_turns ? `remembers ${i.history_turns} earlier exchange(s)` : 'single-turn (no memory of earlier messages)') +
+    ` · base model, not chat-tuned`;
+});
+q.focus();
+</script>
+</body>
+</html>

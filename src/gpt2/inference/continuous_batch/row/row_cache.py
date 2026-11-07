@@ -17,9 +17,10 @@ again -- no cumsum, no padding offset.
 import torch
 
 from gpt2.gpt import GPTConfig
+from gpt2.inference.base_kv_cache import BaseKVCache
 
 
-class RowKVCache:
+class RowKVCache(BaseKVCache):
 
     def __init__(self, batch_size, device, config: GPTConfig, max_tokens=None,
                  dtype=torch.float32):

@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 if TYPE_CHECKING:                       # names the cache contract; no import at run time
-    from gpt2.inference.kv_cache_protocol import KVCacheProtocol
+    from gpt2.inference.base_kv_cache import BaseKVCache
 
 
 @dataclass
@@ -34,7 +34,7 @@ class CausalSelfAttention(nn.Module):
 
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x, kv_cache: 'KVCacheProtocol | None' = None, layer_idx=None, attn_mask=None,
+    def forward(self, x, kv_cache: 'BaseKVCache | None' = None, layer_idx=None, attn_mask=None,
                 cache_row=None):
         B, T, C = x.shape
 
@@ -45,7 +45,7 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.config.n_head, self.head_size).transpose(1, 2)
 
         drop_out = self.config.dropout if self.training else 0.0
-        if kv_cache is not None and cache_row is None and getattr(kv_cache, 'fused_decode', False):
+        if kv_cache is not None and cache_row is None and kv_cache.fused_decode:
             # decode on a paged cache with a fused kernel: the cache writes k/v and
             # attends in one call (no gathered buffers, no mask)
             y = kv_cache.decode_attention(layer_idx, q, k, v)       # B, NH, 1, H
@@ -135,7 +135,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, kv_cache: 'KVCacheProtocol | None' = None, pos_ids=None, attn_mask=None,
+    def forward(self, idx, targets=None, kv_cache: 'BaseKVCache | None' = None, pos_ids=None, attn_mask=None,
                 cache_row=None, cache_active=None):
 
         assert not (kv_cache is not None and attn_mask is None), 'a full-width cache needs a mask to hide unwritten slots'

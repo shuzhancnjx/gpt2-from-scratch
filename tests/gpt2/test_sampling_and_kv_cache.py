@@ -1,11 +1,11 @@
-"""The shared sampling module and the KV-cache contract gpt.py relies on."""
+"""The shared sampling module and BaseKVCache, the contract gpt.py relies on."""
 
 import pytest
 import torch
 
 from gpt2.gpt import GPTConfig
 from gpt2.inference.continuous_batch import PagedKVCache, RowKVCache
-from gpt2.inference.kv_cache_protocol import KVCacheProtocol
+from gpt2.inference.base_kv_cache import BaseKVCache
 from gpt2.inference.sampling import greedy, make_sampler, sample
 from gpt2.inference.static_batch.kv_cache import KVCache
 
@@ -17,7 +17,13 @@ def test_every_cache_meets_the_contract():
               RowKVCache(2, 'cpu', CFG, max_tokens=16),
               PagedKVCache(CFG, num_blocks=9, block_size=4, max_seqs=2, max_blocks_per_seq=4, device='cpu')]
     for cache in caches:
-        assert isinstance(cache, KVCacheProtocol), type(cache).__name__
+        assert isinstance(cache, BaseKVCache), type(cache).__name__
+    assert [c.fused_decode for c in caches] == [False, False, False]
+
+
+def test_base_kv_cache_is_abstract():
+    with pytest.raises(TypeError):
+        BaseKVCache()
 
 
 def test_greedy_and_temperature_zero_agree():

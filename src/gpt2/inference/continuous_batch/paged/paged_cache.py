@@ -33,10 +33,11 @@ Real requests must never share a slot; tests check that.
 import torch
 
 from gpt2.gpt import GPTConfig
+from gpt2.inference.base_kv_cache import BaseKVCache
 from gpt2.inference.continuous_batch.paged.block_allocator import SCRATCH
 
 
-class PagedKVCache:
+class PagedKVCache(BaseKVCache):
 
     def __init__(self, config: GPTConfig, num_blocks, block_size, max_seqs,
                  max_blocks_per_seq, device, dtype=torch.float32, decode_kernel=False):

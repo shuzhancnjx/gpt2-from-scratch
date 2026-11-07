@@ -9,7 +9,7 @@ Phase 2 (this): shards 22..36, +150M tokens.
   10.6M non-embd params, 365M tokens -> 34 tokens/param (past Chinchilla's 20).
 """
 
-from gpt2.training import TrainConfig, train
+from training import TrainConfig, train
 
 CONFIG = TrainConfig(
     n_layer=6, n_head=6, n_embd=384,

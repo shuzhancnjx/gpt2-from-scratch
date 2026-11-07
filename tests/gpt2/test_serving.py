@@ -9,8 +9,8 @@ on the buffers than to infer from generated text.
 import pytest
 import torch
 
-from gpt2.model.gpt import GPTConfig
-from gpt2.inference.continuous_batch import RowKVCache
+from model.gpt2.gpt import GPTConfig
+from inference.continuous_batch import RowKVCache
 
 TINY = dict(vocab_size=64, n_layer=2, n_head=2, n_embd=32, block_size=32,
             dropout=0.0, bias=True)
@@ -140,7 +140,7 @@ GPT2_TINY = dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=32,
 def sched_parts():
     """A toy model with GPT-2's real vocab, so tiktoken ids are valid indices."""
     import tiktoken
-    from gpt2.model.gpt import GPT
+    from model.gpt2.gpt import GPT
     torch.manual_seed(0)
     cfg = GPTConfig(**GPT2_TINY)
     return GPT(cfg).eval(), tiktoken.get_encoding('gpt2'), cfg
@@ -169,7 +169,7 @@ def test_scheduler_matches_the_uncached_path(sched_parts):
     Catches per-row position errors, mask drift, and one request seeing another's
     keys -- none of which raise on their own.
     """
-    from gpt2.inference.continuous_batch import Scheduler
+    from inference.continuous_batch import Scheduler
     model, enc, cfg = sched_parts
 
     got = Scheduler(model, enc, cfg, batch_size=2, max_tokens=64).run(PROMPTS, max_new_tokens=6)
@@ -180,7 +180,7 @@ def test_scheduler_matches_the_uncached_path(sched_parts):
 
 def test_slots_are_reused_across_requests(sched_parts):
     """More prompts than slots: the batch width is fixed, the occupants rotate."""
-    from gpt2.inference.continuous_batch import Scheduler
+    from inference.continuous_batch import Scheduler
     model, enc, cfg = sched_parts
 
     sched = Scheduler(model, enc, cfg, batch_size=2, max_tokens=64)
@@ -193,7 +193,7 @@ def test_slots_are_reused_across_requests(sched_parts):
 
 def test_batch_width_does_not_change_output(sched_parts):
     """Same prompts through 1, 2 and 4 slots must produce identical text."""
-    from gpt2.inference.continuous_batch import Scheduler
+    from inference.continuous_batch import Scheduler
     model, enc, cfg = sched_parts
 
     runs = [Scheduler(model, enc, cfg, batch_size=b, max_tokens=64)
@@ -204,7 +204,7 @@ def test_batch_width_does_not_change_output(sched_parts):
 
 def test_a_short_request_does_not_wait_for_a_long_one(sched_parts):
     """A row that hits its cap is released while its neighbour keeps going."""
-    from gpt2.inference.continuous_batch import Scheduler
+    from inference.continuous_batch import Scheduler
     model, enc, cfg = sched_parts
 
     sched = Scheduler(model, enc, cfg, batch_size=2, max_tokens=64)
@@ -215,7 +215,7 @@ def test_a_short_request_does_not_wait_for_a_long_one(sched_parts):
 
 
 def test_prompt_too_long_for_the_cache_is_rejected(sched_parts):
-    from gpt2.inference.continuous_batch import Scheduler
+    from inference.continuous_batch import Scheduler
     model, enc, cfg = sched_parts
 
     sched = Scheduler(model, enc, cfg, batch_size=1, max_tokens=8)
@@ -229,7 +229,7 @@ def test_mask_covers_written_slots_and_blanks_idle_rows(sched_parts):
     End-to-end text comparison is too weak here: argmax over a randomly
     initialised model picks the same token even with the mask badly wrong.
     """
-    from gpt2.inference.continuous_batch import Scheduler
+    from inference.continuous_batch import Scheduler
     model, enc, cfg = sched_parts
 
     sched = Scheduler(model, enc, cfg, batch_size=3, max_tokens=6)
@@ -250,7 +250,7 @@ def test_decode_feeds_per_row_positions_and_leaves_idle_slots_alone(sched_parts)
     Every decode forward must hand each row its own position, and a slot with no
     request must keep pos == 0 so the next admission finds it free.
     """
-    from gpt2.inference.continuous_batch import Scheduler
+    from inference.continuous_batch import Scheduler
     model, enc, cfg = sched_parts
 
     sched = Scheduler(model, enc, cfg, batch_size=2, max_tokens=64)
@@ -278,7 +278,7 @@ def test_decode_feeds_per_row_positions_and_leaves_idle_slots_alone(sched_parts)
 
 def test_base_scheduler_is_abstract():
     """The loop lives in BaseScheduler; an engine must supply the four decisions."""
-    from gpt2.inference.continuous_batch import BaseScheduler, PagedScheduler, Scheduler
+    from inference.continuous_batch import BaseScheduler, PagedScheduler, Scheduler
     with pytest.raises(TypeError):
         BaseScheduler(None, None, None, 1, 8, 'cpu')
     assert issubclass(Scheduler, BaseScheduler) and issubclass(PagedScheduler, BaseScheduler)

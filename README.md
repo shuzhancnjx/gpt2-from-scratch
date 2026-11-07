@@ -8,9 +8,11 @@ MacBook Pro and an A100.
 ## Layout
 
 ```
-src/gpt2/
+src/                       one top-level package per layer (no umbrella package)
   model/
-    gpt.py                 GPTConfig, attention / MLP / blocks, GPT, generate()
+    gpt2/                  GPT-2; a second model would sit beside it
+      gpt.py               GPTConfig, attention / MLP / blocks, GPT, generate()
+      loading.py           load_model(): a checkpoint, 'gpt2' (OpenAI weights), or a config
   tokenizer/
     tokenizer.py           byte-pair encoding: BPETokenizer + BPETrainer
   utils/
@@ -25,12 +27,13 @@ src/gpt2/
     likelihood.py          validation NLL, perplexity, bits per token, loss by position
     hellaswag.py           HellaSwag acc / acc_norm by likelihood
   inference/
+    base_engine.py         BaseEngine: generate(prompts, SamplingParams), every engine
     base_kv_cache.py       BaseKVCache: the contract every KV cache implements
-    sampling.py            greedy, temperature / top-k / top-p (CUDA-graph safe)
+    sampling.py            greedy, temperature / top-k / top-p, SamplingParams (graph safe)
     static_batch/          one fixed batch, start to finish
       kv_cache.py            KVCache: one write pointer for the whole batch
       decode_step.py         the decode step captured in a CUDA graph
-      inference.py           GptInference: load a checkpoint, generate
+      inference.py           GptInference
     continuous_batch/      requests join and leave every step
       base_scheduler.py      BaseScheduler: the admit -> decode -> retire loop
       row/                   one full-width KV row per request
@@ -41,6 +44,8 @@ src/gpt2/
         paged_cache.py         PagedKVCache: block table, gather, fused decode
         paged_scheduler.py     PagedScheduler: host-mirror decisions, CUDA-graph decode
         paged_attention.py     Triton decode attention over the block table (CUDA)
+  app/
+    llm.py                 LLM: the front door -- load once, pick an engine, generate()
 scripts/        prepare_data, train*, plot_loss, eval_checkpoint,
                 sample, chat_server, bench_paging, profile_serving
 notebooks/      loss curve; Colab notebooks for A100 training and GPU profiling
@@ -49,8 +54,9 @@ tests/          pytest suite (CUDA-only tests skip elsewhere)
 learning/       earlier study code, kept as a record
 ```
 
-`model/`, `tokenizer/` and `utils/` are leaves that import nothing from each other.
-`training/`, `evaluation/` and `inference/` are the applications built on top of them.
+`model/`, `tokenizer/` and `utils/` are the base layers. `training/`, `evaluation/` and
+`inference/` build on them, and `app/` builds on `inference/`. Imports name the layer
+directly: `from model.gpt2 import GPT`, `from app import LLM`.
 
 ## Setup
 
@@ -93,7 +99,7 @@ python scripts/train.py
 Edit `CONFIG` in that file, or drive `TrainConfig` yourself:
 
 ```python
-from gpt2.training import TrainConfig, train
+from training import TrainConfig, train
 
 train(TrainConfig(first_shard=0, num_shards=3))
 ```
@@ -250,7 +256,7 @@ FineWeb-Edu data pipeline all come from that material.
 
 The earlier steps of the course are kept in `learning/` — the attention exercise, the
 bigram-to-transformer progression, and the byte-pair encoder that became
-`src/gpt2/tokenizer/tokenizer.py`.
+`src/tokenizer/tokenizer.py`.
 
 Everything past that point — the package structure, shard windows for continuing a run
 on fresh data, checkpoint/resume handling, the test suite, and the Apple-silicon

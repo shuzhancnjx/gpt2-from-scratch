@@ -3,8 +3,8 @@ import os
 import pytest
 import torch
 
-from gpt2.utils.data import DEFAULT_DATA_ROOT
-from gpt2.model.gpt import GPT, GPTConfig
+from utils.data import DEFAULT_DATA_ROOT
+from model.gpt2.gpt import GPT, GPTConfig
 
 # Everything here runs on CPU with a toy model so the suite stays fast.
 TINY = dict(vocab_size=64, n_layer=2, n_head=2, n_embd=32, block_size=32,

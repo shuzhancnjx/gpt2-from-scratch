@@ -1,4 +1,4 @@
-"""Tests for the KV-cached inference path (gpt2/inference/static_batch/).
+"""Tests for the KV-cached inference path (inference/static_batch/).
 
 Every bug this file targets is silent: a wrong causal mask, a stale position
 offset or a sheared cache all produce fluent-looking text rather than an
@@ -14,9 +14,9 @@ import pytest
 import tiktoken
 import torch
 
-from gpt2.model.gpt import GPT, GPTConfig
-from gpt2.inference.static_batch.inference import GptInference
-from gpt2.inference.static_batch.kv_cache import KVCache
+from model.gpt2.gpt import GPT, GPTConfig
+from inference.static_batch.inference import GptInference
+from inference.static_batch.kv_cache import KVCache
 
 # Real vocab (so tiktoken ids are in range), toy everything else.
 TINY_GPT2 = dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=32,

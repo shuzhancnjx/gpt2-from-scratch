@@ -29,9 +29,9 @@ import tiktoken
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from gpt2.utils.device import default_dtype, pick_device, synchronize
-from gpt2.model.gpt import GPT, GPTConfig
-from gpt2.inference.continuous_batch import PagedScheduler, Scheduler
+from utils.device import default_dtype, pick_device, synchronize
+from model.gpt2.gpt import GPT, GPTConfig
+from inference.continuous_batch import PagedScheduler, Scheduler
 
 MODELS = {
     '124m': dict(vocab_size=50304, n_layer=12, n_head=12, n_embd=768, block_size=1024),

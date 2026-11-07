@@ -1,7 +1,7 @@
 # P1.6 — Training quality, measured by log-likelihood
 
 Tools: [`scripts/eval_checkpoint.py`](../../scripts/eval_checkpoint.py) (any checkpoint, or
-`--hf gpt2`), [`src/gpt2/evaluation/`](../../src/gpt2/evaluation/), and the training
+`--hf gpt2`), [`src/evaluation/`](../../src/evaluation/), and the training
 notebook [`notebooks/colab_train_a100.ipynb`](../../notebooks/colab_train_a100.ipynb).
 
 ## What we evaluate, and why

@@ -3,11 +3,11 @@
 import pytest
 import torch
 
-from gpt2.model.gpt import GPTConfig
-from gpt2.inference.continuous_batch import PagedKVCache, RowKVCache
-from gpt2.inference.base_kv_cache import BaseKVCache
-from gpt2.inference.sampling import greedy, make_sampler, sample
-from gpt2.inference.static_batch.kv_cache import KVCache
+from model.gpt2.gpt import GPTConfig
+from inference.continuous_batch import PagedKVCache, RowKVCache
+from inference.base_kv_cache import BaseKVCache
+from inference.sampling import greedy, make_sampler, sample
+from inference.static_batch.kv_cache import KVCache
 
 CFG = GPTConfig(vocab_size=64, n_layer=2, n_head=2, n_embd=16, block_size=32)
 

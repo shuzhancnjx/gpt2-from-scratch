@@ -9,8 +9,8 @@ wait (not fail) when the pool is tight -- that text comparison cannot see.
 import pytest
 import torch
 
-from gpt2.model.gpt import GPT, GPTConfig
-from gpt2.inference.continuous_batch import PagedScheduler, Scheduler
+from model.gpt2.gpt import GPT, GPTConfig
+from inference.continuous_batch import PagedScheduler, Scheduler
 
 GPT2_TINY = dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=32,
                  block_size=128, dropout=0.0, bias=True)
@@ -180,7 +180,7 @@ def test_a_watermark_never_blocks_an_empty_pool(parts):
 def test_each_request_logs_one_admit_and_one_retire(parts, caplog):
     import logging
     model, enc, cfg = parts
-    caplog.set_level(logging.INFO, logger='gpt2.inference.continuous_batch.paged.paged_scheduler')
+    caplog.set_level(logging.INFO, logger='inference.continuous_batch.paged.paged_scheduler')
     PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W).run(
         PROMPTS, max_new_tokens=3)
 
@@ -193,7 +193,7 @@ def test_each_request_logs_one_admit_and_one_retire(parts, caplog):
 def test_a_wait_is_logged_once_not_every_step(parts, caplog):
     import logging
     model, enc, cfg = parts
-    caplog.set_level(logging.INFO, logger='gpt2.inference.continuous_batch.paged.paged_scheduler')
+    caplog.set_level(logging.INFO, logger='inference.continuous_batch.paged.paged_scheduler')
     longest = max(len(enc.encode(p)) for p in PROMPTS)
     sched = PagedScheduler(model, enc, cfg, max_seqs=4, block_size=4, max_tokens=W,
                            num_blocks=1 + -(-(longest + 4) // 4))      # one request at a time

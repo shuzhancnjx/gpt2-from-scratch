@@ -3,10 +3,10 @@ import math
 import pytest
 import torch
 
-from gpt2.model.gpt import GPT, GPTConfig
-from gpt2.utils.log import Logger, load_checkpoint, read_log
-from gpt2.training.runtime import Runtime
-from gpt2.training.loop import get_lr
+from model.gpt2.gpt import GPT, GPTConfig
+from utils.log import Logger, load_checkpoint, read_log
+from training.runtime import Runtime
+from training.loop import get_lr
 
 from conftest import TINY, FakeLoader
 
@@ -39,7 +39,7 @@ def test_midpoint_is_halfway_in_cosine_terms():
 # --------------------------- evaluate ---------------------------
 
 def test_evaluate_returns_a_plain_float(cpu_runtime):
-    from gpt2.training.loop import evaluate
+    from training.loop import evaluate
     torch.manual_seed(0)
     model = GPT(GPTConfig(**TINY))
     loader = FakeLoader(2, 16, TINY['vocab_size'])
@@ -48,7 +48,7 @@ def test_evaluate_returns_a_plain_float(cpu_runtime):
 
 
 def test_evaluate_restores_training_mode(cpu_runtime):
-    from gpt2.training.loop import evaluate
+    from training.loop import evaluate
     model = GPT(GPTConfig(**TINY))
     model.train()
     evaluate(model, FakeLoader(2, 16, TINY['vocab_size']), 2, cpu_runtime)
@@ -191,26 +191,26 @@ def _touch_ckpts(tmp_path, steps):
 
 
 def test_resolve_latest_picks_the_newest(tmp_path):
-    from gpt2.training.loop import resolve_checkpoint
+    from training.loop import resolve_checkpoint
     _touch_ckpts(tmp_path, [100, 900, 1830])
     assert resolve_checkpoint('latest', str(tmp_path)).endswith('model_001830.pt')
 
 
 def test_resolve_accepts_a_bare_filename(tmp_path):
-    from gpt2.training.loop import resolve_checkpoint
+    from training.loop import resolve_checkpoint
     _touch_ckpts(tmp_path, [1830])
     assert resolve_checkpoint('model_001830.pt', str(tmp_path)).endswith('model_001830.pt')
 
 
 def test_resolve_falls_back_to_run_dir_when_cwd_relative_path_misses(tmp_path):
     """A config written for the repo root must still work when launched elsewhere."""
-    from gpt2.training.loop import resolve_checkpoint
+    from training.loop import resolve_checkpoint
     _touch_ckpts(tmp_path, [1830])
     assert resolve_checkpoint('runs/model_001830.pt', str(tmp_path)).endswith('model_001830.pt')
 
 
 def test_resolve_reports_both_paths_it_tried(tmp_path):
-    from gpt2.training.loop import resolve_checkpoint
+    from training.loop import resolve_checkpoint
     with pytest.raises(FileNotFoundError, match='also tried'):
         resolve_checkpoint('model_999999.pt', str(tmp_path))
 
@@ -218,13 +218,13 @@ def test_resolve_reports_both_paths_it_tried(tmp_path):
 def test_resolve_latest_returns_none_when_there_is_nothing_to_resume(tmp_path):
     """'latest' means "continue if you can", so a first run in a fresh run_dir must
     start from scratch rather than crash."""
-    from gpt2.training.loop import resolve_checkpoint
+    from training.loop import resolve_checkpoint
     assert resolve_checkpoint('latest', str(tmp_path)) is None
 
 
 def test_an_explicit_missing_path_still_raises(tmp_path):
     """A typo must not silently restart training from step 0."""
-    from gpt2.training.loop import resolve_checkpoint
+    from training.loop import resolve_checkpoint
     with pytest.raises(FileNotFoundError):
         resolve_checkpoint('model_001830.pt', str(tmp_path))
 
@@ -235,8 +235,8 @@ def test_hellaswag_and_throughput_are_logged_during_training(tmp_path, cpu_runti
     """hellaswag_every=2 over steps 0..2 → one 'hella' record (step 2, also the last step);
     one 'tok_s' record per step for MFU."""
     import json
-    import gpt2.evaluation.hellaswag as hellaswag
-    from gpt2.training import TrainConfig, train
+    import evaluation.hellaswag as hellaswag
+    from training import TrainConfig, train
 
     examples = [{'ctx': 'A man opens the door and', 'label': 0,
                  'endings': ['walks inside.', 'is blue.', 'sky the.', 'of.']},

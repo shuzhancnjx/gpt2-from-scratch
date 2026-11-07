@@ -5,7 +5,7 @@
     torchrun --standalone --nproc_per_node=8 scripts/train.py
 """
 
-from gpt2.training import TrainConfig, train
+from training import TrainConfig, train
 
 # --- run 8: continue the 124M model on the next window -----------------------------
 #   runs 1-7  shards  0..21   steps     0..13147   215M tokens   val 4.1741   ~31h

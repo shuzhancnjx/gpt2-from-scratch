@@ -19,7 +19,7 @@ logits tensor (B x T x 50304, fp32 for cross_entropy) dominates, not the layers:
                           eval_every=10**9, sample_prompt='', run_dir=f'/tmp/bs_{B}'))
 """
 
-from gpt2.training import TrainConfig, train
+from training import TrainConfig, train
 
 CONFIG = TrainConfig(
     # --- model: GPT-2 124M, unchanged ---

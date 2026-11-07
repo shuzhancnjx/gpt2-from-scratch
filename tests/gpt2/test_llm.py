@@ -8,12 +8,12 @@ the paged scheduler. Only speed and memory may differ.
 import pytest
 import torch
 
-from gpt2.app import LLM, SamplingParams
-from gpt2.inference.base_engine import BaseEngine
-from gpt2.inference.continuous_batch import PagedScheduler, Scheduler
-from gpt2.inference.static_batch.inference import GptInference
-from gpt2.model import GPT, GPTConfig
-from gpt2.model.loading import load_model
+from app import LLM, SamplingParams
+from inference.base_engine import BaseEngine
+from inference.continuous_batch import PagedScheduler, Scheduler
+from inference.static_batch.inference import GptInference
+from model.gpt2 import GPT, GPTConfig
+from model.gpt2.loading import load_model
 
 TINY = GPTConfig(vocab_size=50304, n_layer=2, n_head=2, n_embd=32, block_size=128)
 PROMPTS = ['Hello', 'The capital of France is', 'A', 'It was a bright cold day in April']

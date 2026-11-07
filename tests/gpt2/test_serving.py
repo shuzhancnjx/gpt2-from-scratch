@@ -274,3 +274,12 @@ def test_decode_feeds_per_row_positions_and_leaves_idle_slots_alone(sched_parts)
         for row, is_active in enumerate(active):
             if not is_active:
                 assert pos[row] == 0, f'idle slot {row} drifted to {pos[row]}'
+
+
+def test_base_scheduler_is_abstract():
+    """The loop lives in BaseScheduler; an engine must supply the four decisions."""
+    from gpt2.inference.continuous_batch import BaseScheduler, PagedScheduler, Scheduler
+    with pytest.raises(TypeError):
+        BaseScheduler(None, None, None, 1, 8, 'cpu')
+    assert issubclass(Scheduler, BaseScheduler) and issubclass(PagedScheduler, BaseScheduler)
+    assert not issubclass(PagedScheduler, Scheduler), 'the engines are siblings, not parent/child'

@@ -1,8 +1,7 @@
 """Continuous batching over a paged KV cache.
 
-A subclass of Scheduler, so the diff between the two classes is exactly what paging
-changes. The model, the mask, the decode forward and sampling are inherited; only
-memory decisions differ:
+Both engines subclass BaseScheduler (../base.py), which owns the loop, the mask
+and the reset. What differs is memory and how decisions are made:
 
   Scheduler        every slot owns a full-width row (W tokens), reserved for life.
   PagedScheduler   every request owns ceil((L + max_new) / block_size) blocks from a
@@ -25,33 +24,25 @@ so they never force a GPU sync.
 """
 
 import logging
-from collections import deque
 from math import ceil
 
 import torch
 
 from gpt2.inference.continuous_batch.paged.block_allocator import BlockAllocator
 from gpt2.inference.continuous_batch.paged.paged_cache import PagedKVCache
-from gpt2.inference.continuous_batch.row.scheduler import Scheduler
+from gpt2.inference.continuous_batch.base import BaseScheduler, greedy
 
 log = logging.getLogger(__name__)
 
 
-class PagedScheduler(Scheduler):
+class PagedScheduler(BaseScheduler):
 
     def __init__(self, model, enc, config, max_seqs=4, block_size=16, num_blocks=None,
                  max_tokens=None, watermark=0, device='cpu', dtype=torch.float32,
                  decode_kernel=False):
-        # Not calling super().__init__: it would allocate a RowKVCache we never use.
-        self.model = model
-        self.enc = enc
-        self.config = config
-        self.device = device
-
-        self.B = max_seqs
-        self.W = max_tokens if max_tokens is not None else config.block_size
+        super().__init__(model, enc, config, max_seqs, max_tokens, device)
         if self.W % block_size:
-            # the gathered width must equal W, or the inherited mask no longer lines up
+            # the gathered width must equal W, or the shared mask no longer lines up
             raise ValueError(f'block_size {block_size} must divide max_tokens {self.W}')
         self.bs = block_size
         if num_blocks is None:                    # same memory as a RowKVCache of max_seqs rows
@@ -62,12 +53,6 @@ class PagedScheduler(Scheduler):
         self.cache = PagedKVCache(config, num_blocks, block_size, max_seqs,
                                   self.W // block_size, device, dtype,
                                   decode_kernel=decode_kernel)   # Triton decode attention
-
-        # device state the inherited decode path uses
-        self.active_gpu = torch.zeros(self.B, dtype=torch.bool, device=device)   # read by the model (mask, advance)
-        self.next_token_gpu = torch.zeros(self.B, 1, dtype=torch.long, device=device)
-        self.slot_req_cpu = [None] * self.B
-        self.generated_cpu = {}
 
         # host mirrors: every scheduling decision reads these, never the GPU
         self.row_blocks_cpu = [[] for _ in range(self.B)]
@@ -82,31 +67,19 @@ class PagedScheduler(Scheduler):
         self.graph = None                         # set by capture_graph(); None = eager decode
         self.graph_sampler = None                 # the sampler recorded inside the graph
 
-    # -- the main loop: decide from host mirrors --------------------------------
+    # -- decisions from host mirrors ------------------------------------------
 
-    @torch.inference_mode()
-    def run(self, prompts, max_new_tokens=32, sampler=None):
-        """Same loop as Scheduler.run, but every decision reads a host int, never the GPU."""
+    def _has_active(self):
+        return self.num_active_cpu > 0               # host int: no sync (was active_gpu.any())
+
+    def _choose_sampler(self, sampler):
         if self.graph is not None:
             # the graph replays the sampler it was captured with; it cannot switch
             if sampler is not None and sampler is not self.graph_sampler:
                 raise ValueError('this graph was captured with a different sampler: pass the same '
                                  'one (or none), or capture_graph(sampler) again')
-            sampler = self.graph_sampler
-        sampler = sampler or _greedy
-
-        queue = deque(enumerate(prompts))
-        prompt_ids = [self.enc.encode(p) for p in prompts]
-        results = {}
-
-        self._reset()
-        while queue or self.num_active_cpu:            # was bool(self.active_gpu.any()): a sync
-            self._admit(queue, prompt_ids, sampler, max_new_tokens)
-            if self.num_active_cpu:                    # was a second sync
-                self._decode(sampler)
-            self._retire(results, prompt_ids, max_new_tokens)
-
-        return [prompts[i] + self.enc.decode(results[i]) for i in range(len(prompts))]
+            return self.graph_sampler
+        return sampler or greedy
 
     # -- the three operations --------------------------------------------------
 
@@ -230,7 +203,7 @@ class PagedScheduler(Scheduler):
                          self.allocator.capacity, self.num_active_cpu)
 
     def _reset(self):
-        super()._reset()                              # cache, active, next_token, slot_req, generated
+        super()._reset()                              # cache, active_gpu, next_token_gpu, slot_req, generated
         self.allocator.reset()
         self.row_blocks_cpu = [[] for _ in range(self.B)]
         self.row_len_cpu = [0] * self.B
@@ -256,7 +229,7 @@ class PagedScheduler(Scheduler):
         graph reads -- so a replay sees newly admitted rows automatically.
         """
         assert str(self.device).startswith('cuda'), 'CUDA graphs need a CUDA device'
-        self.graph_sampler = sampler or _greedy
+        self.graph_sampler = sampler or greedy
         with torch.inference_mode():
             self._reset()
             # warm up on a side stream: cuBLAS/SDPA choose kernels and allocate
@@ -281,10 +254,6 @@ class PagedScheduler(Scheduler):
                                attn_mask=self._mask(), cache_active=self.active_gpu)
         tok = self.graph_sampler(logits[:, -1, :self.enc.n_vocab])        # on the GPU
         self.next_token_gpu.copy_(tok)
-
-
-def _greedy(logits):
-    return logits.argmax(-1, keepdim=True)
 
 
 def _short(blocks, n=6):

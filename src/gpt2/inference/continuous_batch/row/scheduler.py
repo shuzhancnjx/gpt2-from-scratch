@@ -23,50 +23,23 @@ Two things fall out of RowKVCache's per-row pointers and are worth noticing:
     that incremental mask updates kept producing.
 """
 
-from collections import deque
-
 import torch
 
+from gpt2.inference.continuous_batch.base import BaseScheduler
 from gpt2.inference.continuous_batch.row.row_cache import RowKVCache
 
 
-class Scheduler:
+class Scheduler(BaseScheduler):
 
     def __init__(self, model, enc, config, batch_size=4, max_tokens=None,
                  device='cpu', dtype=torch.float32):
-        self.model = model
-        self.enc = enc
-        self.config = config
-        self.device = device
-
-        self.B = batch_size
-        self.W = max_tokens if max_tokens is not None else config.block_size
+        super().__init__(model, enc, config, batch_size, max_tokens, device)
         self.cache = RowKVCache(batch_size, device, config, max_tokens=self.W, dtype=dtype)
 
-        self.active_gpu = torch.zeros(self.B, dtype=torch.bool, device=device)   # read by the model (mask, advance)
-        self.next_token_gpu = torch.zeros(self.B, 1, dtype=torch.long, device=device)
-        self.slot_req_cpu = [None] * self.B          # which request occupies each slot
-        self.generated_cpu = {}                      # request id -> list[int]
-
-    # -- public ------------------------------------------------------------
-
-    @torch.inference_mode()
-    def run(self, prompts, max_new_tokens=32, sampler=None):
-        """Generate for every prompt, keeping the batch full. Returns text in order."""
-        sampler = sampler or (lambda logits: logits.argmax(-1, keepdim=True))
-
-        queue = deque(enumerate(prompts))
-        prompt_ids = [self.enc.encode(p) for p in prompts]
-        results = {}
-
-        self._reset()
-        while queue or bool(self.active_gpu.any()):
-            self._admit(queue, prompt_ids, sampler, max_new_tokens)
-            if bool(self.active_gpu.any()):
-                self._decode(sampler)
-            self._retire(results, prompt_ids, max_new_tokens)
-
-        return [prompts[i] + self.enc.decode(results[i]) for i in range(len(prompts))]
+    def _has_active(self):
+        # Reads the GPU: a sync, twice per loop. Kept on purpose -- this engine is the
+        # simple baseline; PagedScheduler answers from a host counter instead.
+        return bool(self.active_gpu.any())
 
     # -- the three operations ----------------------------------------------
 
@@ -129,21 +102,3 @@ class Scheduler:
                 self.cache.release(row)
                 self.active_gpu[row] = False
                 self.slot_req_cpu[row] = None
-
-    # -- helpers -----------------------------------------------------------
-
-    def _mask(self):
-        """Which cache columns each row may attend to, derived from pos.
-
-        `<=` not `<`: the token written this step lands at column pos[r] and has
-        to see itself. `& active` blanks free slots, whose rows are all zeros.
-        """
-        cols = torch.arange(self.W, device=self.device)
-        return (cols <= self.cache.pos_gpu.unsqueeze(1)) & self.active_gpu.unsqueeze(1)
-
-    def _reset(self):
-        self.cache.reset()
-        self.active_gpu.zero_()
-        self.next_token_gpu.zero_()
-        self.slot_req_cpu = [None] * self.B
-        self.generated_cpu = {}

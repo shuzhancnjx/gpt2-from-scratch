@@ -33,7 +33,7 @@ Real requests must never share a slot; tests check that.
 import torch
 
 from gpt2.gpt import GPTConfig
-from gpt2.inference.continuous_batch.block_allocator import SCRATCH
+from gpt2.inference.continuous_batch.paged.block_allocator import SCRATCH
 
 
 class PagedKVCache:
@@ -122,7 +122,7 @@ class PagedKVCache:
         Idle rows sit at pos 0 on the scratch block: they attend one scratch slot,
         which is finite, and their output is never used.
         """
-        from gpt2.inference.continuous_batch.paged_attention import paged_decode_attention
+        from gpt2.inference.continuous_batch.paged.paged_attention import paged_decode_attention
         B, H, T, D = key.shape
         assert T == 1, f'decode writes one token per row, got {T}'
         rows = torch.arange(B, device=self.device)

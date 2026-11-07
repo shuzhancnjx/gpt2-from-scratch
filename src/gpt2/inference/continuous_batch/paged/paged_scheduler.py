@@ -18,7 +18,7 @@ Decisions use host mirrors (row_blocks_cpu, row_len_cpu, active_cpu, num_active_
 scheduler never reads GPU tensors to decide anything.
 
 Logging: every admit, wait and retire is reported through the standard `logging`
-module (logger "gpt2.inference.continuous_batch.paged_scheduler") -- INFO for each request's lifecycle,
+module (logger "gpt2.inference.continuous_batch.paged.paged_scheduler") -- INFO for each request's lifecycle,
 DEBUG for every decode step. The library never configures logging itself; an app
 turns it on (see scripts/chat_server.py --log-level). Log calls read host values only,
 so they never force a GPU sync.
@@ -30,9 +30,9 @@ from math import ceil
 
 import torch
 
-from gpt2.inference.continuous_batch.block_allocator import BlockAllocator
-from gpt2.inference.continuous_batch.paged_cache import PagedKVCache
-from gpt2.inference.continuous_batch.scheduler import Scheduler
+from gpt2.inference.continuous_batch.paged.block_allocator import BlockAllocator
+from gpt2.inference.continuous_batch.paged.paged_cache import PagedKVCache
+from gpt2.inference.continuous_batch.row.scheduler import Scheduler
 
 log = logging.getLogger(__name__)
 

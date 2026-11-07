@@ -27,7 +27,7 @@ from collections import deque
 
 import torch
 
-from gpt2.inference.continuous_batch.row_cache import RowKVCache
+from gpt2.inference.continuous_batch.row.row_cache import RowKVCache
 
 
 class Scheduler:

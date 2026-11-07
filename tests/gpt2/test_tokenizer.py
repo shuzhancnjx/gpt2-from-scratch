@@ -1,4 +1,4 @@
-"""Tests for the fast (linked-list) trainer + encoder in gpt2/tokenizer.py.
+"""Tests for the fast (linked-list) trainer + encoder in gpt2/tokenizer/tokenizer.py.
 
 BPETrainer learns merges via the O(N + merges·log N) linked-list algorithm;
 BPETokenizer replays them.  There's no built-in bridge between the two, so
@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'learning'))
 
-from gpt2.tokenizer import BPETrainer, BPETokenizer
+from gpt2.tokenizer.tokenizer import BPETrainer, BPETokenizer
 from bpe_base import BPETokenizerI          # slow reference, for cross-checks
 
 

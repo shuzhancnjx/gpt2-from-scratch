@@ -38,8 +38,8 @@ from pathlib import Path
 import tiktoken
 import torch
 
-from gpt2.device import default_dtype, pick_device
-from gpt2.gpt import GPT, GPTConfig
+from gpt2.utils.device import default_dtype, pick_device
+from gpt2.model.gpt import GPT, GPTConfig
 from gpt2.inference.continuous_batch import PagedScheduler
 from gpt2.inference.sampling import make_sampler
 

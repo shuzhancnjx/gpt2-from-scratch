@@ -15,7 +15,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
-from gpt2.log import DEFAULT_RUN_DIR, read_log as gpt2_read_log
+from gpt2.utils.log import DEFAULT_RUN_DIR, read_log as gpt2_read_log
 
 # NOTE: the backend is chosen in main(), not here -- importing this module from a
 # notebook must leave the inline backend alone or the figures never render.

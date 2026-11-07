@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import torch
 from torch.distributed import init_process_group, destroy_process_group
 
-from gpt2.device import pick_device
+from gpt2.utils.device import pick_device
 
 
 @dataclass

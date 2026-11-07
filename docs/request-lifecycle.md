@@ -2937,7 +2937,7 @@ mask *derived* from state rather than maintained alongside it.
 
 ### How this repo's cache is updated
 
-Per layer, inside `CausalSelfAttention.forward` ([gpt.py:32](../src/gpt2/gpt.py#L32)):
+Per layer, inside `CausalSelfAttention.forward` ([gpt.py:32](../src/gpt2/model/gpt.py#L32)):
 
 ```
 x                      (B, T, C)
@@ -2952,7 +2952,7 @@ q, k, v                (B, n_head, T, head_size)
 
 This is the **classic** pattern from §13: `update()` is kernel 1 (the write),
 SDPA is kernel 2 (the read of the whole cache). The "flash attention" comment at
-[gpt.py:52](../src/gpt2/gpt.py#L52) refers to SDPA fusing mask, softmax and dropout
+[gpt.py:52](../src/gpt2/model/gpt.py#L52) refers to SDPA fusing mask, softmax and dropout
 *within attention* — it does not fuse the cache write into attention. Those are two
 different senses of "fused". Part V-A shows how to fuse them.
 
@@ -2968,7 +2968,7 @@ attend over. `q` is never cached, so decode attention is lopsided — `(4,12,1,6
 queries against `(4,12,1024,64)` keys, with the mask hiding unwritten columns. That
 mask is load-bearing, not an optimisation: the buffers are zero-filled, so without it
 attention would average over a thousand columns of zeros. Hence the guard at
-[gpt.py:132](../src/gpt2/gpt.py#L132).
+[gpt.py:132](../src/gpt2/model/gpt.py#L132).
 
 `advance()` runs **once per forward**, after all 12 layers — twelve `update()` calls
 all write at the same `pos`, and one `advance()` moves it afterwards. The paged
@@ -3005,7 +3005,7 @@ Two gaps worth naming before starting the work:
 (`assert key.size(2) == 1`). No path accepts "many tokens into a row that already has
 content", which is also exactly the shape of a prefix-cache hit (§16). What is needed is
 per-row write *spans*, `pos[r] : pos[r]+T`, plus a mask causal *within* the chunk.
-[gpt.py:132](../src/gpt2/gpt.py#L132) already adds a `tril` when `T > 1`, which is the
+[gpt.py:132](../src/gpt2/model/gpt.py#L132) already adds a `tril` when `T > 1`, which is the
 mask half of it.
 
 **`release()` zeroes 24 buffers per retire**, proportional to `W`, on the hot path at

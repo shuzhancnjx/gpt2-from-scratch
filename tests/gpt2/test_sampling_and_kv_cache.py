@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from gpt2.gpt import GPTConfig
+from gpt2.model.gpt import GPTConfig
 from gpt2.inference.continuous_batch import PagedKVCache, RowKVCache
 from gpt2.inference.base_kv_cache import BaseKVCache
 from gpt2.inference.sampling import greedy, make_sampler, sample

@@ -13,7 +13,7 @@ import torch
 
 # repo_root/runs
 DEFAULT_RUN_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
     'runs')
 
 

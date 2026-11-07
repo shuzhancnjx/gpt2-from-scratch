@@ -29,8 +29,8 @@ import tiktoken
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from gpt2.device import default_dtype, pick_device, synchronize
-from gpt2.gpt import GPT, GPTConfig
+from gpt2.utils.device import default_dtype, pick_device, synchronize
+from gpt2.model.gpt import GPT, GPTConfig
 from gpt2.inference.continuous_batch import PagedScheduler, Scheduler
 
 MODELS = {

@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from gpt2.gpt import GPT, GPTConfig
+from gpt2.model.gpt import GPT, GPTConfig
 
 
 def test_forward_shapes(tiny_model, tiny_config):

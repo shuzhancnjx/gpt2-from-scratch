@@ -9,7 +9,7 @@ buffers, much easier to assert there than to infer from generated text.
 import pytest
 import torch
 
-from gpt2.gpt import GPTConfig
+from gpt2.model.gpt import GPTConfig
 from gpt2.inference.continuous_batch import RowKVCache
 from gpt2.inference.continuous_batch.paged.block_allocator import SCRATCH
 from gpt2.inference.continuous_batch.paged.paged_cache import PagedKVCache

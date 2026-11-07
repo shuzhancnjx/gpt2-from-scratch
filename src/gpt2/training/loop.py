@@ -14,9 +14,9 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from gpt2.data import DataLoaderLite
-from gpt2.gpt import GPT, GPTConfig
-from gpt2.log import DEFAULT_RUN_DIR, Logger, load_checkpoint
+from gpt2.utils.data import DataLoaderLite
+from gpt2.model.gpt import GPT, GPTConfig
+from gpt2.utils.log import DEFAULT_RUN_DIR, Logger, load_checkpoint
 from gpt2.training.config import TrainConfig
 from gpt2.training.runtime import Runtime, setup_runtime
 

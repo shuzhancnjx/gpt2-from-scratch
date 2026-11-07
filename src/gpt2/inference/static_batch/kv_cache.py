@@ -1,5 +1,5 @@
 import torch 
-from gpt2.gpt import GPTConfig
+from gpt2.model.gpt import GPTConfig
 from gpt2.inference.base_kv_cache import BaseKVCache
 
 class KVCache(BaseKVCache):

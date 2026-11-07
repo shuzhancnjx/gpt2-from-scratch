@@ -21,10 +21,10 @@ import time
 import tiktoken
 import torch
 
-from gpt2.data import DEFAULT_DATA_ROOT, load_tokens
-from gpt2.device import pick_device, synchronize
+from gpt2.utils.data import DEFAULT_DATA_ROOT, load_tokens
+from gpt2.utils.device import pick_device, synchronize
 from gpt2.evaluation import evaluate_hellaswag, val_nll
-from gpt2.gpt import GPT, GPTConfig
+from gpt2.model.gpt import GPT, GPTConfig
 
 POSITIONS = (0, 1, 3, 15, 63, 255, 1023)        # loss at these context positions
 

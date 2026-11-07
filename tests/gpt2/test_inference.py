@@ -14,7 +14,7 @@ import pytest
 import tiktoken
 import torch
 
-from gpt2.gpt import GPT, GPTConfig
+from gpt2.model.gpt import GPT, GPTConfig
 from gpt2.inference.static_batch.inference import GptInference
 from gpt2.inference.static_batch.kv_cache import KVCache
 

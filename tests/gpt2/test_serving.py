@@ -9,7 +9,7 @@ on the buffers than to infer from generated text.
 import pytest
 import torch
 
-from gpt2.gpt import GPTConfig
+from gpt2.model.gpt import GPTConfig
 from gpt2.inference.continuous_batch import RowKVCache
 
 TINY = dict(vocab_size=64, n_layer=2, n_head=2, n_embd=32, block_size=32,
@@ -140,7 +140,7 @@ GPT2_TINY = dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=32,
 def sched_parts():
     """A toy model with GPT-2's real vocab, so tiktoken ids are valid indices."""
     import tiktoken
-    from gpt2.gpt import GPT
+    from gpt2.model.gpt import GPT
     torch.manual_seed(0)
     cfg = GPTConfig(**GPT2_TINY)
     return GPT(cfg).eval(), tiktoken.get_encoding('gpt2'), cfg

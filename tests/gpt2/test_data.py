@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from gpt2.data import DataLoaderLite
+from gpt2.utils.data import DataLoaderLite
 
 from conftest import requires_data
 

@@ -32,7 +32,7 @@ Real requests must never share a slot; tests check that.
 
 import torch
 
-from gpt2.gpt import GPTConfig
+from gpt2.model.gpt import GPTConfig
 from gpt2.inference.base_kv_cache import BaseKVCache
 from gpt2.inference.continuous_batch.paged.block_allocator import SCRATCH
 

@@ -1,7 +1,7 @@
 import torch 
 import tiktoken
 from gpt2.inference.static_batch.kv_cache import KVCache
-from gpt2.gpt import GPT, GPTConfig
+from gpt2.model.gpt import GPT, GPTConfig
 from gpt2.inference.static_batch.decode_step import DecodeStep
 from gpt2.inference.sampling import sample
 import time 

@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from gpt2.evaluation.hellaswag import evaluate_hellaswag, render, score
 from gpt2.evaluation.likelihood import val_nll
-from gpt2.gpt import GPT, GPTConfig
+from gpt2.model.gpt import GPT, GPTConfig
 
 CFG = dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=32, block_size=64, dropout=0.0, bias=True)
 EXAMPLES = [

@@ -410,7 +410,7 @@ step.pos.copy_(row_pos.unsqueeze(1))
 step.graph.replay()
 ```
 
-**Why `pos_ids=self.pos` is passed.** Without it, [gpt.py](../src/gpt2/gpt.py)'s default
+**Why `pos_ids=self.pos` is passed.** Without it, [gpt.py](../src/gpt2/model/gpt.py)'s default
 path computes `past = kv_cache.seq_len()` — `int(self.pos)`
 ([kv_cache.py](../src/gpt2/inference/static_batch/kv_cache.py)). During capture that is a sync, so
 capture fails; even if it were allowed, `torch.arange(past, past + T)` would be recorded as
@@ -469,7 +469,7 @@ once more at the very end, as `lm_head`, through weight tying (Appendix A).
 
 ## The transformer block
 
-Each of the 12 layers is a `Block` with two halves — [gpt.py](../src/gpt2/gpt.py):
+Each of the 12 layers is a `Block` with two halves — [gpt.py](../src/gpt2/model/gpt.py):
 
 ```python
 def forward(self, x, …):
@@ -521,7 +521,7 @@ does not care that the batch mixes requests.
 
 Because 24 sublayers add into the same stream, its variance grows with each addition; the
 model starts the projections that write into it smaller, by `1/√(2 × n_layer)`
-([gpt.py](../src/gpt2/gpt.py), `c_proj.weight`). **Layer norm** handles the other kind of
+([gpt.py](../src/gpt2/model/gpt.py), `c_proj.weight`). **Layer norm** handles the other kind of
 stability — activation scale — and GPT-2 places it *before* each sublayer (*pre-norm*),
 leaving the residual path a pure identity.
 
@@ -577,7 +577,7 @@ q, k, v = qkv.split(768)          # each (6, 768), viewed as (6 tokens, 12 heads
   then a learned scale and shift. Not the linear transform — that is the `@ W_qkv`.
 - **`W_qkv`** is three `768 × 768` matrices side by side, `[W_q | W_k | W_v]`, so one
   matmul produces all three — fused QKV, because one large matmul beats three small ones.
-  In this repo it is `c_attn` ([gpt.py](../src/gpt2/gpt.py)); `nn.Linear` stores its
+  In this repo it is `c_attn` ([gpt.py](../src/gpt2/model/gpt.py)); `nn.Linear` stores its
   weight as `(2304, 768)` and computes `x @ weight.T + bias`.
 - **Each layer has its own `W_qkv`** — 12 different matrices.
 - **Heads are slices**, not separate matrices: columns 0–63 of `W_q` produce head 0's
@@ -1091,7 +1091,7 @@ something.**
   layer.
 - **The embeddings are used once**, at the input — not inside the layers.
 - **The one shared weight is between embedding and output**: `wte.weight =
-  lm_head.weight` ([gpt.py](../src/gpt2/gpt.py)). The same matrix turns tokens into
+  lm_head.weight` ([gpt.py](../src/gpt2/model/gpt.py)). The same matrix turns tokens into
   vectors at the start and vectors into token scores at the end, saving 38.6M parameters.
 - Within a layer, the 12 heads are column slices of one matrix, not separate matrices.
   Some models share more — ALBERT reuses one layer's weights everywhere, and GQA lets
@@ -1145,7 +1145,7 @@ classification).
 | **safetensors** | a JSON header (name, dtype, shape, byte offset) + raw tensor bytes | no code execution; the standard for released models; can be memory-mapped |
 
 Loading copies each named tensor into the parameter with the same name; mismatched names
-or shapes fail. This repo's `from_pretrained` ([gpt.py](../src/gpt2/gpt.py)) walks both
+or shapes fail. This repo's `from_pretrained` ([gpt.py](../src/gpt2/model/gpt.py)) walks both
 state dicts by name and **transposes** `attn.c_attn`, `attn.c_proj`, `mlp.c_fc` and
 `mlp.c_proj`, because the original GPT-2 code stored them as `(in, out)` instead of
 `nn.Linear`'s `(out, in)` — a small version of what vLLM and SGLang do when loading a

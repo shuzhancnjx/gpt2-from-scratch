@@ -9,7 +9,7 @@ wait (not fail) when the pool is tight -- that text comparison cannot see.
 import pytest
 import torch
 
-from gpt2.gpt import GPT, GPTConfig
+from gpt2.model.gpt import GPT, GPTConfig
 from gpt2.inference.continuous_batch import PagedScheduler, Scheduler
 
 GPT2_TINY = dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=32,

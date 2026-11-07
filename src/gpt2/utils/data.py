@@ -12,7 +12,7 @@ import torch
 # repo_root/data -- data lives outside the source tree, so this walks up out of
 # src/gpt2/ to find it. Override with DataLoaderLite(data_root=...).
 DEFAULT_DATA_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
     'data', 'edu_fineweb10B')
 
 

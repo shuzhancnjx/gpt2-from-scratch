@@ -3,8 +3,8 @@ import math
 import pytest
 import torch
 
-from gpt2.gpt import GPT, GPTConfig
-from gpt2.log import Logger, load_checkpoint, read_log
+from gpt2.model.gpt import GPT, GPTConfig
+from gpt2.utils.log import Logger, load_checkpoint, read_log
 from gpt2.training.runtime import Runtime
 from gpt2.training.loop import get_lr
 

@@ -80,7 +80,7 @@ def main():
                          f'pass one with --checkpoint, or train first with scripts/train.py')
 
     torch.manual_seed(args.seed)
-    inf = GptInference(str(ckpt), device=args.device)
+    inf = GptInference.from_checkpoint(str(ckpt), device=args.device)
 
     if args.check:
         raise SystemExit(0 if check(inf, args.prompts, args.max_new_tokens) else 1)

@@ -1,36 +1,40 @@
-import torch 
-import tiktoken
-from gpt2.inference.static_batch.kv_cache import KVCache
-from gpt2.model.gpt import GPT, GPTConfig
+import time
+
+import torch
+
+from gpt2.inference.base_engine import BaseEngine
+from gpt2.inference.sampling import SamplingParams, sample
 from gpt2.inference.static_batch.decode_step import DecodeStep
-from gpt2.inference.sampling import sample
-import time 
+from gpt2.inference.static_batch.kv_cache import KVCache
 
-class GptInference: 
 
-    def __init__(self, model_url, device='cpu'):
+class GptInference(BaseEngine):
+    """Static batching: every prompt in one batch, left-padded, run to the end together."""
 
-        # load model
+    def __init__(self, model, enc, config, device='cpu'):
+        self.model = model.eval()
+        self.enc = enc
+        self.config = config
         self.device = device
-        checkpoint = torch.load(model_url,
-                                map_location=device, weights_only=True)
-
-        self.config = GPTConfig(**checkpoint['config'])
-        self.model = GPT(self.config)
-
-        self.model.load_state_dict(checkpoint['model'])
-        self.model.to(device)
-
         self.dtype = next(self.model.parameters()).dtype
-        
-        self.model.eval()
-
-        self.enc = tiktoken.get_encoding('gpt2')
 
         self.last_stats = None
-
         self.decode_steps = {}
         self.use_graph = str(device).startswith('cuda')
+
+    @classmethod
+    def from_checkpoint(cls, path, device='cpu'):
+        """Load a checkpoint and build the engine. fp32, as this engine always ran."""
+        from gpt2.model.loading import load_model
+        model, enc, config = load_model(path, device, dtype=torch.float32)
+        return cls(model, enc, config, device)
+
+    @torch.inference_mode()
+    def generate(self, prompts, params=None):
+        params = params or SamplingParams()
+        self.sample(list(prompts), max_new_tokens=params.max_new_tokens,
+                    temperature=params.temperature, top_k=params.top_k, top_p=params.top_p)
+        return [self._completion(t) for t in self._last_generated]
 
     def _decode_step(self, B, W):
 
@@ -139,10 +143,13 @@ class GptInference:
         }
 
         outputs = []
+        self._last_generated = []
         for i in range(B):
 
             row = idx[i][mask[i]]
             outputs.append(self.enc.decode(row.tolist())) 
+            gen = idx[i, L:L + steps][mask[i, L:L + steps]]
+            self._last_generated.append(gen.tolist())
 
         return outputs[0] if single else outputs
 

@@ -39,7 +39,7 @@ def inference(tmp_path):
     model = GPT(GPTConfig(**TINY_GPT2))
     ckpt = tmp_path / 'tiny.pt'
     torch.save({'config': TINY_GPT2, 'model': model.state_dict()}, ckpt)
-    return GptInference(str(ckpt))
+    return GptInference.from_checkpoint(str(ckpt))
 
 
 def greedy_reference(model, enc, prompt, max_new_tokens):

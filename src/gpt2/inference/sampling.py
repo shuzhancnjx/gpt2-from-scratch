@@ -3,6 +3,7 @@
     greedy(logits)                               argmax
     sample(logits, temperature, top_k, top_p)    temperature, then top-k, then top-p
     make_sampler(temperature, top_k, top_p)      a one-argument sampler for the schedulers
+    SamplingParams                               the settings of one generate() call
 
 Everything here is tensor ops only: no .item(), no int(), no `if` on a tensor value,
 no boolean-mask indexing (that needs the count of True values on the CPU -- a sync).
@@ -11,6 +12,8 @@ Python numbers (the settings), which are fixed when the sampler is built.
 
 logits: (B, V). Returns (B, 1) token ids.
 """
+
+from dataclasses import dataclass
 
 import torch
 
@@ -57,3 +60,20 @@ def make_sampler(temperature=1.0, top_k=None, top_p=None):
     def sampler(logits):
         return sample(logits, temperature=temperature, top_k=top_k, top_p=top_p)
     return sampler
+
+
+@dataclass(frozen=True)
+class SamplingParams:
+    """How to generate: shared by every engine's generate().
+
+    Frozen, so it is hashable: PagedScheduler keeps one captured CUDA graph per
+    distinct SamplingParams (a graph fixes its sampler when it is recorded).
+    temperature 0 means greedy.
+    """
+    max_new_tokens: int = 32
+    temperature: float = 0.0
+    top_k: int | None = None
+    top_p: float | None = None
+
+    def sampler(self):
+        return make_sampler(self.temperature, top_k=self.top_k, top_p=self.top_p)

@@ -40,7 +40,7 @@ class PagedScheduler(BaseScheduler):
 
     def __init__(self, model, enc, config, max_seqs=4, block_size=16, num_blocks=None,
                  max_tokens=None, watermark=0, device='cpu', dtype=torch.float32,
-                 decode_kernel=False):
+                 decode_kernel=False, cuda_graph=False):
         super().__init__(model, enc, config, max_seqs, max_tokens, device)
         if self.W % block_size:
             # the gathered width must equal W, or the shared mask no longer lines up
@@ -67,11 +67,23 @@ class PagedScheduler(BaseScheduler):
         self._waiting_req = None                  # log a wait once, not every step
         self.graph = None                         # set by capture_graph(); None = eager decode
         self.graph_sampler = None                 # the sampler recorded inside the graph
+        self.cuda_graph = cuda_graph              # generate(): capture one graph per SamplingParams
+        self._graphs = {}                         # (temperature, top_k, top_p) -> (graph, sampler)
 
     # -- decisions from host mirrors ------------------------------------------
 
     def _has_active(self):
         return self.num_active_cpu > 0               # host int: no sync (was active_gpu.any())
+
+    def _sampler_for(self, params):
+        if not self.cuda_graph:
+            return self._choose_sampler(params.sampler())
+        key = (params.temperature, params.top_k, params.top_p)   # max_new_tokens: not in the graph
+        if key not in self._graphs:                    # first call with these settings
+            self.capture_graph(params.sampler())
+            self._graphs[key] = (self.graph, self.graph_sampler)
+        self.graph, self.graph_sampler = self._graphs[key]
+        return self.graph_sampler
 
     def _choose_sampler(self, sampler):
         if self.graph is not None:

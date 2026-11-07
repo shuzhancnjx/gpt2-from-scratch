@@ -15,15 +15,16 @@ the operations works:
                                              host mirrors, optional CUDA-graph decode
 """
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from collections import deque
 
 import torch
 
-from gpt2.inference.sampling import greedy
+from gpt2.inference.base_engine import BaseEngine
+from gpt2.inference.sampling import SamplingParams, greedy
 
 
-class BaseScheduler(ABC):
+class BaseScheduler(BaseEngine):
 
     def __init__(self, model, enc, config, num_rows, max_tokens, device):
         self.model = model
@@ -47,8 +48,23 @@ class BaseScheduler(ABC):
     @torch.inference_mode()
     def run(self, prompts, max_new_tokens=32, sampler=None):
         """Generate for every prompt, keeping the rows full. Returns text in order."""
-        sampler = self._choose_sampler(sampler)
+        results = self._run(prompts, max_new_tokens, self._choose_sampler(sampler))
+        return [prompts[i] + self.enc.decode(results[i]) for i in range(len(prompts))]
 
+    @torch.inference_mode()
+    def generate(self, prompts, params=None):
+        params = params or SamplingParams()
+        prompts = list(prompts)
+        results = self._run(prompts, params.max_new_tokens, self._sampler_for(params))
+        return [self._completion(results[i]) for i in range(len(prompts))]
+
+    def _sampler_for(self, params):
+        """The sampler a generate() call uses. PagedScheduler overrides this to pick
+        (or capture) the CUDA graph recorded with these params."""
+        return self._choose_sampler(params.sampler())
+
+    def _run(self, prompts, max_new_tokens, sampler):
+        """The loop itself. Returns {prompt index: generated token ids}."""
         queue = deque(enumerate(prompts))
         prompt_ids = [self.enc.encode(p) for p in prompts]
         results = {}
@@ -59,8 +75,7 @@ class BaseScheduler(ABC):
             if self._has_active():
                 self._decode(sampler)
             self._retire(results, prompt_ids, max_new_tokens)
-
-        return [prompts[i] + self.enc.decode(results[i]) for i in range(len(prompts))]
+        return results
 
     # -- what each engine decides --------------------------------------------
 

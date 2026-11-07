@@ -172,7 +172,7 @@ moved) says which — explains FlashAttention, quantization, batching and most o
 
   *Decided 2026-10-18: written by you, reviewed by Claude* — so it earns Building credit
   (unlike P1.4 a–e). Suggested order:
-  - [ ] **a — decode kernel, one program per (row, head).** Walk the block table up to the
+  - [x] **a — decode kernel, one program per (row, head).** Walk the block table up to the
         real length, online softmax, no gather and no mask. Test with `assert_close`
         against `PagedKVCache._gather` + SDPA, including partial last blocks and rows of
         different lengths.
@@ -457,6 +457,8 @@ scheduling and cost decisions become first-principles answers instead of convent
 | 2026-10-18 | 1 | **Q1 accepted (a, b, c).** b: A100 step ≈ 8 ms CPU + 0.26→0.94 ms GPU, so 8× rows barely lengthens the step; Mac per-row dominated ✓. c: time decode at R = 2…32 — flat on A100, linear on Mac ✓. Nuance noted: the model predicts ~7×; measured 3.3× because prefill (one request per forward) is the rest — links to Q2. Remaining in paging.md: Q2–Q4. |
 | 2026-10-18 | 1 | **Q2 accepted.** a: prefill:decode 4.3:1 → ~50% at 32 new tokens, so mainly the engine ✓. b: 60–100 rows ≈ 60–100 FLOPs/byte < ridge ~200 ✓; fixed CPU cost per forward amortised by more rows ✓. c: batch prefill, prefill share drops ✓. Remaining in paging.md: Q3, Q4. |
 | 2026-10-18 | 1 | **Q3 and Q4 accepted on substance — paging analysis Q1–Q5 complete.** Q3: full 1,024 width vs ~112 real ✓, `attn_mask` rules out Flash ✓, read only real blocks ✓; polish: state the ratio (~9×), and why block size alone doesn't help (the gather pads to W regardless), drop the old answer line. Q4: launch overhead (~8 ms vs ~0.3 ms GPU) ✓, CUDA graph + remove `int()` syncs ✓, profiler inflates CPU time → compare with/without ✓; polish: name the sync site (`scheduler.py:115`, `int(tok[row])` per row), Triton cuts GPU work, not idle time. |
+| 2026-11-07 | 1 | **P1.5a accepted — your kernel.** `src/gpt2/inference/continuous_batch/paged_attention.py`, written by you from the reviewed example; on Colab (CUDA) all 10 tests in `tests/gpt2/test_paged_attention.py` pass: matches gather + SDPA in fp32 (1e-4) and fp16 (2e-3), every edge length (1, 15, 16, 17, 100, 1024), never reads past the real length, shape/dtype kept. Draft review caught: `tl.range` vs `tl.arange`, `tl.maximum` vs `tl.max` (reduce vs elementwise), store inside the loop, a misspelled `running_max` that would have silently zeroed `rescale`. Also done (by Claude, at your request): decode syncs ~66 → 1 per step via host mirrors, `_cpu`/`_gpu` naming, CUDA-graph decode — graph test not yet run on CUDA. Next: b (wire in), c (measure). |
+| 2026-11-07 | 1 | **CUDA-graph decode verified on CUDA:** `test_graph_decode_matches_eager` passes (12 prompts through 2 rows — replays pick up rows admitted between them; every block returned) and `test_graph_refuses_a_different_sampler` passes. Correctness only — speed not yet measured (P1.5c). |
 
 ## Evaluation log
 

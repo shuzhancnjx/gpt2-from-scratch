@@ -2,6 +2,7 @@
 
     python scripts/bench_paging.py                          # 124M config, auto device
     python scripts/bench_paging.py --model tiny --device cpu
+    python scripts/bench_paging.py --graph                  # CUDA: also the CUDA-graph decode
 
 Both engines get the same KV budget: RowKVCache with `--row-slots` full-width rows,
 and a block pool holding exactly as many tokens (+1 scratch block) shared by up to
@@ -72,6 +73,8 @@ def main():
     p.add_argument('--prompt-max', type=int, default=128)
     p.add_argument('--max-new', type=int, default=32)
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--graph', action='store_true',
+                   help='CUDA only: also run the paged engine with its decode step in a CUDA graph')
     p.add_argument('--out', default='results/bench_paging.json')
     args = p.parse_args()
 
@@ -97,6 +100,14 @@ def main():
     }
     reserved = {'row': args.row_slots * W * bytes_per_token,
                 'paged': num_blocks * args.block_size * bytes_per_token}
+    if args.graph:
+        if not device.startswith('cuda'):
+            raise SystemExit('--graph needs a CUDA device')
+        engines['paged+graph'] = PagedScheduler(model, enc, cfg, max_seqs=args.paged_seqs,
+                                                block_size=args.block_size, num_blocks=num_blocks,
+                                                max_tokens=W, device=device, dtype=dtype)
+        engines['paged+graph'].capture_graph()
+        reserved['paged+graph'] = reserved['paged']
 
     print(f'device: {device} ({device_name(device)})  dtype: {dtype}  model: {args.model}  '
           f'W={W}  prompts={args.num_prompts} ({args.prompt_min}-{args.prompt_max} tok)  '
@@ -106,13 +117,15 @@ def main():
     for name, sched in engines.items():
         sched.run(prompts[:2], max_new_tokens=2)                      # warm-up
         seconds, generated, peak = timed_run(sched, prompts, args.max_new, device)
-        resident = sched.peak_active if name == 'paged' else args.row_slots
+        paged = name.startswith('paged')
+        resident = sched.peak_active if paged else args.row_slots
         results[name] = dict(seconds=seconds, generated_tokens=generated,
+                             decode_steps=sched.decode_steps if paged else None,
                              tokens_per_s=generated / seconds, max_resident=resident,
                              kv_reserved_mb=reserved[name] / 2**20,
                              peak_allocated_mb=None if peak is None else peak / 2**20)
         r = results[name]
-        print(f'{name:6s} {r["seconds"]:7.2f} s  {r["tokens_per_s"]:8.1f} tok/s  '
+        print(f'{name:11s} {r["seconds"]:7.2f} s  {r["tokens_per_s"]:8.1f} tok/s  '
               f'resident {r["max_resident"]:3d}  KV reserved {r["kv_reserved_mb"]:7.1f} MB  '
               f'peak {"n/a" if peak is None else f"{peak / 2**20:.1f} MB"}')
 

@@ -227,3 +227,30 @@ def test_graph_refuses_a_different_sampler(parts):
     s.graph, s.graph_sampler = object(), (lambda logits: logits.argmax(-1, keepdim=True))
     with pytest.raises(ValueError, match='different sampler'):
         s.run(PROMPTS, max_new_tokens=2, sampler=lambda logits: logits.argmax(-1, keepdim=True))
+
+
+# -- Triton decode kernel wired in (P1.5b) ------------------------------------------
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='Triton needs CUDA')
+@pytest.mark.parametrize('graph', [False, True])
+def test_decode_kernel_matches_the_row_scheduler(parts, graph):
+    """Decode through the paged kernel (eager and graph-captured): same text as the
+    row engine, with requests joining and leaving mid-run."""
+    model, enc, cfg = parts
+    model = model.to('cuda')
+    prompts = PROMPTS * 3
+    expected = Scheduler(model, enc, cfg, batch_size=2, max_tokens=W, device='cuda').run(
+        prompts, max_new_tokens=6)
+    sched = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W,
+                           device='cuda', decode_kernel=True)
+    if graph:
+        sched.capture_graph()
+    assert sched.run(prompts, max_new_tokens=6) == expected
+    assert sched.allocator.num_free == sched.allocator.capacity
+
+
+def test_decode_kernel_refuses_a_non_cuda_device(parts):
+    model, enc, cfg = parts
+    with pytest.raises(ValueError, match='CUDA'):
+        PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W,
+                       device='cpu', decode_kernel=True)

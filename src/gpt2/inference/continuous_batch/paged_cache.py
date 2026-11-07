@@ -39,7 +39,7 @@ from gpt2.inference.continuous_batch.block_allocator import SCRATCH
 class PagedKVCache:
 
     def __init__(self, config: GPTConfig, num_blocks, block_size, max_seqs,
-                 max_blocks_per_seq, device, dtype=torch.float32):
+                 max_blocks_per_seq, device, dtype=torch.float32, decode_kernel=False):
         head_size = config.n_embd // config.n_head
         shape = (num_blocks, block_size, config.n_head, head_size)
 
@@ -59,6 +59,13 @@ class PagedKVCache:
         self.width = max_blocks_per_seq * block_size
         self.batch_size = max_seqs
         self.device = device
+
+        # decode_kernel: decode attention by the Triton paged kernel (reads only each
+        # row's real blocks, no gather, no mask) instead of _gather + SDPA. CUDA only;
+        # prefill always uses the gather path.
+        if decode_kernel and not str(device).startswith('cuda'):
+            raise ValueError('decode_kernel needs CUDA (Triton)')
+        self.fused_decode = decode_kernel
 
     # -- block table (host decisions → device) -------------------------------
 
@@ -105,6 +112,28 @@ class PagedKVCache:
         self._flat(self.value[layer_idx]).index_copy_(0, slots, self._tokens_first(value))
 
         return self._gather(self.key[layer_idx], sel), self._gather(self.value[layer_idx], sel)
+
+    def decode_attention(self, layer_idx, query, key, value):
+        """Decode with the Triton kernel: write this layer's new k/v, then attend.
+
+        query/key/value: (B, H, 1, D), one new token per row. Returns (B, H, 1, D).
+        Each row attends over pos + 1 tokens: its history plus the token written now --
+        the same columns the scheduler's mask (cols <= pos) allowed on the gather path.
+        Idle rows sit at pos 0 on the scratch block: they attend one scratch slot,
+        which is finite, and their output is never used.
+        """
+        from gpt2.inference.continuous_batch.paged_attention import paged_decode_attention
+        B, H, T, D = key.shape
+        assert T == 1, f'decode writes one token per row, got {T}'
+        rows = torch.arange(B, device=self.device)
+        positions = self.pos_gpu[:B]
+        slots = self.slots(rows, positions)
+        self._flat(self.key[layer_idx]).index_copy_(0, slots, self._tokens_first(key))
+        self._flat(self.value[layer_idx]).index_copy_(0, slots, self._tokens_first(value))
+
+        out = paged_decode_attention(query[:, :, 0], self.key[layer_idx], self.value[layer_idx],
+                                     self.block_table_gpu[:B], positions + 1)
+        return out.unsqueeze(2)
 
     def _flat(self, pool):
         return pool.view(self.num_blocks * self.block_size, *pool.shape[2:])

@@ -182,6 +182,29 @@ moved) says which — explains FlashAttention, quantization, batching and most o
         roofline, and the Q5 numbers (attention and gather share, peak memory, tokens/s)
         compared with your Q5 prediction.
   - [ ] **d — `reshape_and_cache`** (the write side) as a Triton kernel, replacing `index_copy_`.
+  - [x] **e — decode CPU overhead** *(code by Claude at your request; measured by you)*:
+        decisions from host mirrors (`*_cpu` / `*_gpu` naming), syncs ~66 → 1 per step,
+        decode captured in a CUDA graph. A100, 32 rows, gather path: **10.32 → 9.38 → 3.85
+        ms per decode step**; tok/s ×2.1 at 128 new tokens, ×1.5 at 32 (prefill unchanged).
+
+- [ ] **P1.7 Prefill.** Measured 2026-11-07: ~0.31 s for 32 prompts (~10 ms per prompt)
+  against ~0.2 ms of real work per prompt (weights 0.17 ms + 72 × 250M FLOPs 0.06 ms) —
+  ~98% overhead. Prefill is ~half the run at 32 new tokens, so after P1.5 it is the
+  bottleneck. Measure every step the same way: prefill = run time − decode steps × ms per step.
+  - [ ] **a — prompt-only attention.** Today prefill gathers the row to the full
+        W = 1024 and attends with an explicit mask (memory-efficient kernel over 1,024
+        columns; `paged_cache.py` `update(row=…)` → `_gather`, `gpt.py` builds the tril mask).
+        A fresh request has no history: write its K/V into the pool, then attend over the
+        prompt's own K/V with `is_causal=True` (Flash). *Accept when:* identical greedy text
+        to the row engine; prefill ms per prompt measured before/after.
+  - [ ] **b — batched prefill.** Admit up to N waiting requests in one forward, under a
+        token budget. First padded to the longest prompt (simple), then packed with
+        `cu_seqlens` (varlen: no padding). *Accept when:* identical text; prefill time vs the
+        roofline estimate (~2 ms compute-bound for 32 prompts ≈ 2,300 tokens); tok/s at 32
+        and 128 new tokens against your prediction.
+  - Prefill and decode stay separate phases within a step here. Mixing them in one batch
+    (chunked prefill, P3.1) and running them on different GPUs (disaggregation, Phase 3)
+    are the serving-scale follow-ups.
 
 - [ ] **P1.6 Pretrain GPT-2 124M properly on the A100, and measure its quality by
   log-likelihood.** Fresh run with `scripts/train_a100.py` (GPT-2 reference recipe:
@@ -334,8 +357,10 @@ comparisons.
   *Accept when:* outputs match the reference; TTFT/TPOT measured under a mixed workload.
 - [ ] **P3.2 Prefix caching.** Chained block hashes, refcounts, tail-first LRU eviction.
   *Accept when:* hit rate and prefill tokens saved measured on a shared-prompt workload.
-- [ ] **P3.3 Async scheduling.** *Accept when:* throughput gain measured against the P1.2
-  baseline, with traces.
+- [ ] **P3.3 Async scheduling.** Overlap the per-step token copy and CPU bookkeeping with
+  the next GPU step (SGLang / vLLM V1), or multi-step decode (k steps per sync). Also
+  per-request sampling (temperature as a per-row tensor inside the graph).
+  *Accept when:* throughput gain measured against the P1.5e baseline (3.85 ms/step), with traces.
 - [ ] **P3.4 One of quantization or speculative decoding**, implemented and measured.
 - [ ] **P3.5 Read vLLM V1.** Scheduler, KV-cache manager, model runner.
   *Accept when:* a write-up mapping vLLM's components onto `request-lifecycle.md`, noting
@@ -459,6 +484,8 @@ scheduling and cost decisions become first-principles answers instead of convent
 | 2026-10-18 | 1 | **Q3 and Q4 accepted on substance — paging analysis Q1–Q5 complete.** Q3: full 1,024 width vs ~112 real ✓, `attn_mask` rules out Flash ✓, read only real blocks ✓; polish: state the ratio (~9×), and why block size alone doesn't help (the gather pads to W regardless), drop the old answer line. Q4: launch overhead (~8 ms vs ~0.3 ms GPU) ✓, CUDA graph + remove `int()` syncs ✓, profiler inflates CPU time → compare with/without ✓; polish: name the sync site (`scheduler.py:115`, `int(tok[row])` per row), Triton cuts GPU work, not idle time. |
 | 2026-11-07 | 1 | **P1.5a accepted — your kernel.** `src/gpt2/inference/continuous_batch/paged_attention.py`, written by you from the reviewed example; on Colab (CUDA) all 10 tests in `tests/gpt2/test_paged_attention.py` pass: matches gather + SDPA in fp32 (1e-4) and fp16 (2e-3), every edge length (1, 15, 16, 17, 100, 1024), never reads past the real length, shape/dtype kept. Draft review caught: `tl.range` vs `tl.arange`, `tl.maximum` vs `tl.max` (reduce vs elementwise), store inside the loop, a misspelled `running_max` that would have silently zeroed `rescale`. Also done (by Claude, at your request): decode syncs ~66 → 1 per step via host mirrors, `_cpu`/`_gpu` naming, CUDA-graph decode — graph test not yet run on CUDA. Next: b (wire in), c (measure). |
 | 2026-11-07 | 1 | **CUDA-graph decode verified on CUDA:** `test_graph_decode_matches_eager` passes (12 prompts through 2 rows — replays pick up rows admitted between them; every block returned) and `test_graph_refuses_a_different_sampler` passes. Correctness only — speed not yet measured (P1.5c). |
+| 2026-11-07 | 1 | **P1.5c part 1 measured (A100, paged 32 rows, gather path).** ms per decode step (Δ between 32 and 128 new tokens): before 10.32 → fix 1 (1 sync) 9.38 → fix 1 + CUDA graph 3.85. tok/s at 128 new: 2,481 → 2,725 → 5,126 (2.1×); at 32 new: 1,550 → 2,384 (1.5×) — Amdahl: prefill unchanged. Syncs cost ~0.9 ms (~14 µs each); launches ~5.5 ms. 3.85 ms sits above the ~2.6 ms gather-path floor → step is now GPU-bound; next lever is wiring the kernel in (P1.5b). Caveats: row line's ms/step used the paged step count (row has 4× more steps → ~7.8 ms); peak MB not comparable across processes (the after-run also holds the graph engine's pool). |
+| 2026-11-07 | 1 | **Prefill plan agreed → P1.7** (a: prompt-only causal attention instead of the 1,024-wide gather; b: batched prefill, padded then varlen). Clarified: the Triton kernel covers decode only — prefill still gathers to W. Chunked prefill, disaggregation, prefix caching stay in Phase 3 (P3.1, P3.2); overlap scheduling and per-row sampling added to P3.3. Order: P1.5b → P1.7a → P1.7b. |
 
 ## Evaluation log
 

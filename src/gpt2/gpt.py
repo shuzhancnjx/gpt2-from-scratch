@@ -39,11 +39,15 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.config.n_head, self.head_size).transpose(1, 2)
         v = v.view(B, T, self.config.n_head, self.head_size).transpose(1, 2)
 
-        if kv_cache is not None: 
-            k, v = kv_cache.update(layer_idx, k, v, row=cache_row)
-
         drop_out = self.config.dropout if self.training else 0.0
-        if attn_mask is not None: 
+        if kv_cache is not None and cache_row is None and getattr(kv_cache, 'fused_decode', False):
+            # decode on a paged cache with a fused kernel: the cache writes k/v and
+            # attends in one call (no gathered buffers, no mask)
+            y = kv_cache.decode_attention(layer_idx, q, k, v)       # B, NH, 1, H
+        elif kv_cache is not None:
+            k, v = kv_cache.update(layer_idx, k, v, row=cache_row)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_out)
+        elif attn_mask is not None: 
             y = F.scaled_dot_product_attention(
                 q, k, v, 
                 attn_mask=attn_mask, 

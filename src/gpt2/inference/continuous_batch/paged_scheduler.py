@@ -40,7 +40,8 @@ log = logging.getLogger(__name__)
 class PagedScheduler(Scheduler):
 
     def __init__(self, model, enc, config, max_seqs=4, block_size=16, num_blocks=None,
-                 max_tokens=None, watermark=0, device='cpu', dtype=torch.float32):
+                 max_tokens=None, watermark=0, device='cpu', dtype=torch.float32,
+                 decode_kernel=False):
         # Not calling super().__init__: it would allocate a RowKVCache we never use.
         self.model = model
         self.enc = enc
@@ -59,7 +60,8 @@ class PagedScheduler(Scheduler):
 
         self.allocator = BlockAllocator(num_blocks)
         self.cache = PagedKVCache(config, num_blocks, block_size, max_seqs,
-                                  self.W // block_size, device, dtype)
+                                  self.W // block_size, device, dtype,
+                                  decode_kernel=decode_kernel)   # Triton decode attention
 
         # device state the inherited decode path uses
         self.active_gpu = torch.zeros(self.B, dtype=torch.bool, device=device)   # read by the model (mask, advance)

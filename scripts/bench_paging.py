@@ -3,6 +3,7 @@
     python scripts/bench_paging.py                          # 124M config, auto device
     python scripts/bench_paging.py --model tiny --device cpu
     python scripts/bench_paging.py --graph                  # CUDA: also the CUDA-graph decode
+    python scripts/bench_paging.py --graph --kernel         # CUDA: also with the Triton decode kernel
 
 Both engines get the same KV budget: RowKVCache with `--row-slots` full-width rows,
 and a block pool holding exactly as many tokens (+1 scratch block) shared by up to
@@ -75,6 +76,9 @@ def main():
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--graph', action='store_true',
                    help='CUDA only: also run the paged engine with its decode step in a CUDA graph')
+    p.add_argument('--kernel', action='store_true',
+                   help='CUDA only: also run the paged engine with the Triton decode-attention '
+                        'kernel (and graph + kernel when --graph is given)')
     p.add_argument('--out', default='results/bench_paging.json')
     args = p.parse_args()
 
@@ -108,6 +112,18 @@ def main():
                                                 max_tokens=W, device=device, dtype=dtype)
         engines['paged+graph'].capture_graph()
         reserved['paged+graph'] = reserved['paged']
+    if args.kernel:
+        if not device.startswith('cuda'):
+            raise SystemExit('--kernel needs a CUDA device')
+        variants = ['paged+kernel'] + (['paged+graph+kernel'] if args.graph else [])
+        for name in variants:
+            engines[name] = PagedScheduler(model, enc, cfg, max_seqs=args.paged_seqs,
+                                           block_size=args.block_size, num_blocks=num_blocks,
+                                           max_tokens=W, device=device, dtype=dtype,
+                                           decode_kernel=True)
+            reserved[name] = reserved['paged']
+        if args.graph:
+            engines['paged+graph+kernel'].capture_graph()
 
     print(f'device: {device} ({device_name(device)})  dtype: {dtype}  model: {args.model}  '
           f'W={W}  prompts={args.num_prompts} ({args.prompt_min}-{args.prompt_max} tok)  '
@@ -125,7 +141,7 @@ def main():
                              kv_reserved_mb=reserved[name] / 2**20,
                              peak_allocated_mb=None if peak is None else peak / 2**20)
         r = results[name]
-        print(f'{name:11s} {r["seconds"]:7.2f} s  {r["tokens_per_s"]:8.1f} tok/s  '
+        print(f'{name:18s} {r["seconds"]:7.2f} s  {r["tokens_per_s"]:8.1f} tok/s  '
               f'resident {r["max_resident"]:3d}  KV reserved {r["kv_reserved_mb"]:7.1f} MB  '
               f'peak {"n/a" if peak is None else f"{peak / 2**20:.1f} MB"}')
 

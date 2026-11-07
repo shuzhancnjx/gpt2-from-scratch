@@ -25,7 +25,7 @@ Two things fall out of RowKVCache's per-row pointers and are worth noticing:
 
 import torch
 
-from gpt2.inference.continuous_batch.base import BaseScheduler
+from gpt2.inference.continuous_batch.base_scheduler import BaseScheduler
 from gpt2.inference.continuous_batch.row.row_cache import RowKVCache
 
 

@@ -1,6 +1,6 @@
 """Continuous batching over a paged KV cache.
 
-Both engines subclass BaseScheduler (../base.py), which owns the loop, the mask
+Both engines subclass BaseScheduler (../base_scheduler.py), which owns the loop, the mask
 and the reset. What differs is memory and how decisions are made:
 
   Scheduler        every slot owns a full-width row (W tokens), reserved for life.
@@ -30,7 +30,7 @@ import torch
 
 from gpt2.inference.continuous_batch.paged.block_allocator import BlockAllocator
 from gpt2.inference.continuous_batch.paged.paged_cache import PagedKVCache
-from gpt2.inference.continuous_batch.base import BaseScheduler, greedy
+from gpt2.inference.continuous_batch.base_scheduler import BaseScheduler, greedy
 
 log = logging.getLogger(__name__)
 

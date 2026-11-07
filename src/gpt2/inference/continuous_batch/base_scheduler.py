@@ -20,9 +20,7 @@ from collections import deque
 
 import torch
 
-
-def greedy(logits):
-    return logits.argmax(-1, keepdim=True)
+from gpt2.inference.sampling import greedy
 
 
 class BaseScheduler(ABC):

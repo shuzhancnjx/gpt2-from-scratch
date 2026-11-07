@@ -30,7 +30,8 @@ import torch
 
 from gpt2.inference.continuous_batch.paged.block_allocator import BlockAllocator
 from gpt2.inference.continuous_batch.paged.paged_cache import PagedKVCache
-from gpt2.inference.continuous_batch.base_scheduler import BaseScheduler, greedy
+from gpt2.inference.continuous_batch.base_scheduler import BaseScheduler
+from gpt2.inference.sampling import greedy
 
 log = logging.getLogger(__name__)
 
@@ -221,7 +222,7 @@ class PagedScheduler(BaseScheduler):
         once after __init__, on CUDA. run() then always uses this sampler.
 
         The sampler must be capturable: tensor ops only, no reads back to the CPU.
-        topk / softmax / multinomial (scripts/chat_server.py make_sampler) qualify.
+        Everything in gpt2/inference/sampling.py qualifies.
 
         Safe to capture with no requests: every row is inactive, so the forward writes
         only to the scratch block and advance() adds 0 to pos. Prefill stays eager

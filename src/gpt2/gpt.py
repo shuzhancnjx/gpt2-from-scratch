@@ -1,10 +1,14 @@
 """The GPT-2 model: config, blocks, and the top-level module."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+
+if TYPE_CHECKING:                       # names the cache contract; no import at run time
+    from gpt2.inference.kv_cache_protocol import KVCacheProtocol
 
 
 @dataclass
@@ -30,7 +34,8 @@ class CausalSelfAttention(nn.Module):
 
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x, kv_cache=None,  layer_idx=None, attn_mask=None, cache_row=None):
+    def forward(self, x, kv_cache: 'KVCacheProtocol | None' = None, layer_idx=None, attn_mask=None,
+                cache_row=None):
         B, T, C = x.shape
 
         q, k, v = self.c_attn(x).split(self.config.n_embd, dim=2)
@@ -130,7 +135,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, kv_cache=None, pos_ids=None, attn_mask=None,
+    def forward(self, idx, targets=None, kv_cache: 'KVCacheProtocol | None' = None, pos_ids=None, attn_mask=None,
                 cache_row=None, cache_active=None):
 
         assert not (kv_cache is not None and attn_mask is None), 'a full-width cache needs a mask to hide unwritten slots'

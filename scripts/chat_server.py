@@ -41,6 +41,7 @@ import torch
 from gpt2.device import default_dtype, pick_device
 from gpt2.gpt import GPT, GPTConfig
 from gpt2.inference.continuous_batch import PagedScheduler
+from gpt2.inference.sampling import make_sampler
 
 log = logging.getLogger('chat_server')
 
@@ -64,18 +65,6 @@ def load_model(path, device):
     model = GPT(cfg)
     model.load_state_dict(ck['model'])
     return model.eval().to(device=device, dtype=default_dtype(device)), cfg
-
-
-def make_sampler(temperature, top_k):
-    if temperature <= 0:
-        return lambda logits: logits.argmax(-1, keepdim=True)
-
-    def sample(logits):
-        logits = logits.float() / temperature
-        kth = torch.topk(logits, top_k, dim=-1).values[:, -1:]
-        logits = logits.masked_fill(logits < kth, float('-inf'))
-        return torch.multinomial(torch.softmax(logits, -1), 1)
-    return sample
 
 
 def render(messages, enc, budget, history_turns=0):
@@ -373,7 +362,7 @@ def main():
 
     sched = PagedScheduler(model, enc, cfg, max_seqs=args.max_seqs, block_size=args.block_size,
                            max_tokens=cfg.block_size, device=device, dtype=default_dtype(device))
-    sampler = make_sampler(args.temperature, args.top_k)
+    sampler = make_sampler(args.temperature, top_k=args.top_k)
     sched.run(['Hello'], max_new_tokens=2, sampler=sampler)          # warm-up
     engine = Engine(sched, sampler, args.max_new, args.max_seqs)
     engine.start()

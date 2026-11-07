@@ -3,6 +3,7 @@ import tiktoken
 from gpt2.inference.static_batch.kv_cache import KVCache
 from gpt2.gpt import GPT, GPTConfig
 from gpt2.inference.static_batch.decode_step import DecodeStep
+from gpt2.inference.sampling import sample
 import time 
 
 class GptInference: 
@@ -146,45 +147,8 @@ class GptInference:
         return outputs[0] if single else outputs
 
 
-    def sample_next_token(self, logits, temperature=1.0, top_k=None, top_p=None): 
-
-        if temperature == 0: 
-            return torch.argmax(logits, dim=-1, keepdim=True)
-
-        logits = logits / temperature
-
-        if top_k is not None: 
-            values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            threshold = values[:, -1].unsqueeze(-1)
-            logits = torch.where(logits < threshold, torch.full_like(logits, float('-inf')), logits)
-
-        if top_p is not None: 
-            return self.top_p_sampling(logits=logits, top_p=top_p)
-
-        probs = torch.softmax(logits, dim=-1)
-
-        return torch.multinomial(probs, num_samples=1)
-
-
-    def top_p_sampling(self, logits, top_p):
-
-        # The top token's exclusive mass is 0, so `0 >= top_p` is True once top_p
-        # hits 0 and every token gets dropped. Treat it as greedy, the way
-        # temperature == 0 is handled.
-        if top_p <= 0:
-            return torch.argmax(logits, dim=-1, keepdim=True)
-
-        sorted_logits, sorted_idx = torch.sort(logits,  dim=-1, descending=True)
-
-        probs = sorted_logits.softmax(dim=-1)
-
-        drop = probs.cumsum(-1) - probs >= top_p
-
-        probs[drop] = 0 
-
-        next_token_pos = torch.multinomial(probs, num_samples=1)
-
-        return torch.gather(sorted_idx, -1, next_token_pos)
+    def sample_next_token(self, logits, temperature=1.0, top_k=None, top_p=None):
+        return sample(logits, temperature=temperature, top_k=top_k, top_p=top_p)
 
     def _sync(self): 
 

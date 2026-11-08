@@ -21,8 +21,8 @@ from abc import ABC, abstractmethod
 class BaseEngine(ABC):
 
     @abstractmethod
-    def generate(self, prompts, params=None):
-        """prompts: list[str]. params: SamplingParams (default: greedy, 32 tokens).
+    def generate(self, prompts, sampling_params=None):
+        """prompts: list[str]. sampling_params: SamplingParams (default: greedy, 32 tokens).
         Returns list[str], the completions, in prompt order."""
 
     def _completion(self, tokens):

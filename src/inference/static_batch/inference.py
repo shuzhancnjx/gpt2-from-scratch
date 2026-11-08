@@ -30,10 +30,10 @@ class GptInference(BaseEngine):
         return cls(model, enc, config, device)
 
     @torch.inference_mode()
-    def generate(self, prompts, params=None):
-        params = params or SamplingParams()
-        self.sample(list(prompts), max_new_tokens=params.max_new_tokens,
-                    temperature=params.temperature, top_k=params.top_k, top_p=params.top_p)
+    def generate(self, prompts, sampling_params=None):
+        sampling_params = sampling_params or SamplingParams()
+        self.sample(list(prompts), max_new_tokens=sampling_params.max_new_tokens,
+                    temperature=sampling_params.temperature, top_k=sampling_params.top_k, top_p=sampling_params.top_p)
         return [self._completion(t) for t in self._last_generated]
 
     def _decode_step(self, B, W):

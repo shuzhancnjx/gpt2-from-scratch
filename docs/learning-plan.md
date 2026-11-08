@@ -202,6 +202,11 @@ moved) says which — explains FlashAttention, quantization, batching and most o
         `cu_seqlens` (varlen: no padding). *Accept when:* identical text; prefill time vs the
         roofline estimate (~2 ms compute-bound for 32 prompts ≈ 2,300 tokens); tok/s at 32
         and 128 new tokens against your prediction.
+  - [ ] **c — CUDA graphs for prefill and decode** *(your build: `inference/cuda_graph.py`
+        CapturedGraph / GraphCache / BaseGraphs; `paged/graph/` PrefillGraphs (one graph per
+        padded token bucket) and DecodeGraphs (one per sampler setting))*. *Accept when:*
+        graph prefill = eager text (CUDA); prefill time measured against the ~32 ms eager
+        baseline; the token budget re-measured (`bench_admission.py --budgets`).
   - Prefill and decode stay separate phases within a step here. Mixing them in one batch
     (chunked prefill, P3.1) and running them on different GPUs (disaggregation, Phase 3)
     are the serving-scale follow-ups.
@@ -353,6 +358,16 @@ comparisons.
 
 ### Milestones
 
+- [ ] **P3.0 Engine split** (agreed 2026-11-08). Break PagedScheduler into components plus an
+  orchestrator, the vLLM V1 / SGLang shape: **Scheduler** (policy, CPU only: queue, FCFS,
+  budget, watermark, prefilled buffer, decode-row records -> a StepPlan), **BlockManager**
+  (allocator + block-table rows), **ModelRunner** (model, cache attention, graphs, sampling,
+  GPU buffers), **Engine** (the loop: plan = schedule(); tokens = execute(plan);
+  update(tokens)). Steps, each keeping tests green: Admission record + BlockManager ->
+  Scheduler.schedule() -> StepPlan with pure-CPU tests -> ModelRunner.execute(plan) -> Engine
+  loop. Enables step-level serving (requests join between steps), overlap scheduling (P3.3),
+  chunked prefill (P3.1) and disaggregation. *Accept when:* identical text to today's engine;
+  scheduler policy tested without a model; no regression in tok/s or ms per step.
 - [ ] **P3.1 Flat token stream.** Chunked prefill with `cu_seqlens` and a token budget.
   *Accept when:* outputs match the reference; TTFT/TPOT measured under a mixed workload.
 - [ ] **P3.2 Prefix caching.** Chained block hashes, refcounts, tail-first LRU eviction.
@@ -489,6 +504,7 @@ scheduling and cost decisions become first-principles answers instead of convent
 | 2026-11-07 | 1 | **Kernel in the engine measured (A100, 32 rows, ms per decode step via Δ32→128):** paged eager 9.78 · +graph 3.96 · +kernel (eager) 9.40 · **+graph+kernel 1.40**. Kernel alone −0.4 ms (CPU-bound, as your Q5a predicted); with the graph it cuts the step 2.8× (3.96 → 1.40). tok/s at 128 new: 2,631 → 8,142 (3.1×; 8.5× the row engine). Still ~5× above the ~0.28 ms roofline (250 MB + 32 × ~150 tok × 36 KB): remaining = per-kernel cost of ~hundreds of small graph nodes, index_copy, kernel occupancy, the one sync — profile next. Prefill is now the bottleneck: ~88% of the run at 32 new tokens, ~64% at 128 → P1.7. Eager peak −71 MB with the kernel (the gather copy). Pending for P1.5b acceptance: the CUDA test output (cell 3). |
 | 2026-11-08 | 1 | **P1.7a/b measured — packed prefill on prompts only** (code by Claude at your request, branch `packed-prefill`, db041be; CUDA suite 183 passed). A100, 32 prompts, paged + graph + kernel: **prefill 331 → 31.7 ms** (`--max-new 1`, eager; 10.35 → 0.99 ms per prompt, **10.4×**); decode unchanged 1.32 → 1.38 ms/step (kernel now serves prefill too). tok/s at 32 new tokens **2,636 → 15,799 (6×)**, at 128 **7,955 → 20,797 (2.6×)** — 21× the row engine. Bottleneck now decode again (1.46 ms vs ~0.28 ms roofline), plus ~15× headroom left in prefill (~32 ms vs ~2 ms compute floor for ~2,300 tokens). Next: per-step profile; tiled varlen prefill kernel; token budget. |
 | 2026-11-08 | 1 | **Two-stage admission measured** (code by Claude, branch `decouple-prefill` 4de319d; CUDA tests 59 passed). A100, 128 prompts (16–256 tok), 16 decode rows, 64 new, graph + kernel: vs main, same tok/s (9,492 → 9,453), **TTFT p50 464 → 371 ms (−20%)**, p95 771 → 682 ms; step p50 1.44 ms unchanged, max 23.3 → 18.7 ms. **Prefill token budget backfired**: 512 → 6,862 tok/s, 256 → 4,815 tok/s, TTFT up, while the worst step only fell to 15.6 / 13.2 ms — each prefill forward carries ~10 ms of fixed (launch) cost, so splitting prefill into 44 / 99 forwards multiplies it. Lesson: a budget only pays once prefill cost scales with tokens → step 3 (prefill CUDA graphs) first. |
+| 2026-11-08 | 1 | **Prefill CUDA graphs built (P1.7c, branch `prefill-graphs`)**: CapturedGraph / GraphCache / BaseGraphs (contract: key, prepare, _build, run — all abstract) in `inference/cuda_graph.py`; PrefillGraphs (bucket key, pad row, samples after replay) and DecodeGraphs (sampler-setting key, samples inside, captured before a run) in `paged/graph/`. Scheduler cleanups along the way: the loop carries `sampling_params`; `_decode` (shared computation) + `_record_tokens` (engine bookkeeping); `_prefill` / `_prefill_logits` mirror decode, no sync inside; capture via `cuda_graph=True` (capture_graph() gone). Mac suite 182 passed; CUDA tests + measurements pending. **Agreed next: P3.0 engine split.** |
 
 ## Evaluation log
 

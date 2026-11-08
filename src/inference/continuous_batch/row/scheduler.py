@@ -43,7 +43,7 @@ class Scheduler(BaseScheduler):
 
     # -- the three operations ----------------------------------------------
 
-    def _admit(self, queue, prompt_ids, sampler, max_new_tokens):
+    def _admit(self, queue, prompt_ids, sampling_params):
         """Fill every free slot from the queue, then prefill them all in one forward."""
         rows, reqs = [], []
         for row in range(self.B):
@@ -53,15 +53,16 @@ class Scheduler(BaseScheduler):
                 continue
             req, _ = queue.popleft()
             L = len(prompt_ids[req])
-            if L == 0 or L + max_new_tokens > self.W:
+            if L == 0 or L + sampling_params.max_new_tokens > self.W:
                 raise ValueError(f'request {req}: prompt of {L} tokens does not fit '
-                                 f'(cache width {self.W} leaves room for {self.W - max_new_tokens})')
+                                 f'(cache width {self.W} leaves room for {self.W - sampling_params.max_new_tokens})')
             rows.append(row)
             reqs.append(req)
         if not rows:
             return
 
-        first_gpu, first = self._prefill(rows, [prompt_ids[r] for r in reqs], sampler)
+        first_gpu = self._prefill(rows, [prompt_ids[r] for r in reqs], sampling_params)
+        first = first_gpu.view(-1).tolist()                      # the one sync for all of them
         rows_gpu = torch.tensor(rows, device=self.device)
         self.next_token_gpu[rows_gpu] = first_gpu
         self.active_gpu[rows_gpu] = True
@@ -69,18 +70,12 @@ class Scheduler(BaseScheduler):
             self.slot_req_cpu[row] = req
             self.generated_cpu[req] = [tok]
 
-    def _decode(self, sampler):
-        """One token for every row, each writing at its own pos."""
-        logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
-                               pos_ids=self.cache.seq_len().unsqueeze(1),
-                               attn_mask=self._mask(), cache_active=self.active_gpu)
-
-        tok = sampler(logits[:, -1, :self.enc.n_vocab])
-        self.next_token_gpu = tok
-
+    def _record_tokens(self):
+        """Each active row's new token to its request. Reads the GPU per row (a sync each)
+        -- kept on purpose: this engine is the simple baseline."""
         for row in range(self.B):
             if self.active_gpu[row]:
-                self.generated_cpu[self.slot_req_cpu[row]].append(int(tok[row]))
+                self.generated_cpu[self.slot_req_cpu[row]].append(int(self.next_token_gpu[row]))
 
     def _retire(self, results, prompt_ids, max_new_tokens):
         eot = self.enc.eot_token

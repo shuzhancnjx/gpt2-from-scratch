@@ -88,6 +88,6 @@ def test_paged_graph_per_sampling_setting(checkpoint):
     eager = LLM(checkpoint, engine='paged', device='cuda', max_seqs=2, block_size=4, max_tokens=64)
     assert llm.generate(PROMPTS, GREEDY) == eager.generate(PROMPTS, GREEDY)
     llm.generate(PROMPTS, SamplingParams(max_new_tokens=3))                  # same sampler: no new graph
-    assert len(llm.engine._graphs) == 1
+    assert len(llm.engine.decode_graphs) == 1
     llm.generate(PROMPTS, SamplingParams(max_new_tokens=3, temperature=0.8, top_k=40))
-    assert len(llm.engine._graphs) == 2
+    assert len(llm.engine.decode_graphs) == 2

@@ -105,9 +105,9 @@ def test_engine_groups_a_batch_by_sampling_params(llm):
     calls = []
     original = llm.engine.generate
 
-    def spy(prompts, params):
-        calls.append((len(prompts), params))
-        return original(prompts, params)
+    def spy(prompts, sampling_params):
+        calls.append((len(prompts), sampling_params))
+        return original(prompts, sampling_params)
 
     llm.engine.generate = spy
     try:

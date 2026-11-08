@@ -105,8 +105,8 @@ def main():
             raise SystemExit('--graph needs a CUDA device')
         engines['paged+graph'] = PagedScheduler(model, enc, cfg, max_seqs=args.paged_seqs,
                                                 block_size=args.block_size, num_blocks=num_blocks,
-                                                max_tokens=W, device=device, dtype=dtype)
-        engines['paged+graph'].capture_graph()
+                                                max_tokens=W, device=device, dtype=dtype,
+                                                cuda_graph=True)
         reserved['paged+graph'] = reserved['paged']
 
     print(f'device: {device} ({device_name(device)})  dtype: {dtype}  model: {args.model}  '

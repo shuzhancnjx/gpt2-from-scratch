@@ -46,16 +46,16 @@ class LLM:
             return Scheduler(*args, device=self.device, dtype=dtype, **options)
         return PagedScheduler(*args, device=self.device, dtype=dtype, **options)
 
-    def generate(self, prompts, params=None, **settings):
-        """prompts: a string or a list of strings. Settings go in `params` or as keywords
+    def generate(self, prompts, sampling_params=None, **settings):
+        """prompts: a string or a list of strings. Settings go in `sampling_params` or as keywords
         (max_new_tokens=, temperature=, top_k=, top_p=). Returns the completion(s),
         matching the input: a string for a string, a list for a list."""
-        if params is None:
-            params = SamplingParams(**settings)
+        if sampling_params is None:
+            sampling_params = SamplingParams(**settings)
         elif settings:
-            raise TypeError('pass either params or keyword settings, not both')
+            raise TypeError('pass either sampling_params or keyword settings, not both')
         single = isinstance(prompts, str)
-        out = self.engine.generate([prompts] if single else list(prompts), params)
+        out = self.engine.generate([prompts] if single else list(prompts), sampling_params)
         return out[0] if single else out
 
     def __repr__(self):

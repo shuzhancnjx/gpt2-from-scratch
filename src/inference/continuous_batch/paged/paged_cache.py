@@ -63,10 +63,11 @@ class PagedKVCache(BaseKVCache):
         # Rows [0, max_seqs) are the decode batch. Rows [max_seqs, max_seqs + prefilled_rows)
         # hold PREFILLED requests waiting for a decode row: their blocks are written, they
         # just are not decoding yet. promote() moves one into a free decode row.
-        rows = max_seqs + prefilled_rows
+        rows = max_seqs + prefilled_rows + 1 
         self.block_table_gpu = torch.full((rows, max_blocks_per_seq), SCRATCH,
                                           dtype=torch.long, device=device)
         self.pos_gpu = torch.zeros(rows, dtype=torch.long, device=device)
+        self.pad_row = rows - 1
 
         self.num_blocks = num_blocks
         self.block_size = block_size

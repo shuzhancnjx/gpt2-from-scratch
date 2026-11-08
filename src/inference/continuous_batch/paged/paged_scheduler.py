@@ -60,7 +60,8 @@ import torch
 from inference.continuous_batch.paged.block_allocator import BlockAllocator
 from inference.continuous_batch.paged.paged_cache import PagedKVCache
 from inference.continuous_batch.base_scheduler import BaseScheduler
-from inference.sampling import greedy
+from inference.continuous_batch.paged.graph.decode_graph import DecodeGraphs
+from inference.continuous_batch.paged.graph.prefill_graph import PrefillGraphs
 
 log = logging.getLogger(__name__)
 
@@ -82,8 +83,9 @@ class PagedScheduler(BaseScheduler):
         watermark           blocks kept free while other requests hold blocks, so running
                             requests are not starved by a burst of admissions
         device, dtype       where the pool lives and its precision
-        cuda_graph          generate(): replay the decode step as a CUDA graph, one graph
-                            per sampler setting (CUDA only)
+        cuda_graph          replay the decode step as a CUDA graph (CUDA only): one graph
+                            per sampler setting, captured before the first run that uses it.
+                            (generate() with any settings; run() is greedy)
         prefilled_rows      capacity of the prefilled buffer: how many requests may be
                             prefilled and waiting for a decode row at once. Each holds its
                             blocks while it waits. Default: max_seqs (a full next batch).
@@ -125,10 +127,12 @@ class PagedScheduler(BaseScheduler):
         self.peak_blocks = 0                      # most blocks in use at once
         self.decode_steps = 0
         self._waiting_req = None                  # log a wait once, not every step
-        self.graph = None                         # set by capture_graph(); None = eager decode
-        self.graph_sampler = None                 # the sampler recorded inside the graph
-        self.cuda_graph = cuda_graph              # generate(): capture one graph per SamplingParams
-        self._graphs = {}                         # (temperature, top_k, top_p) -> (graph, sampler)
+        # CUDA graphs: the decode step replayed with one launch, one graph per sampler setting
+        self.decode_graphs = None
+        self.prefill_graphs = None 
+        if cuda_graph and str(device).startswith('cuda'):
+            self.decode_graphs = DecodeGraphs(self)
+            self.prefill_graphs = PrefillGraphs(self)
 
     # -- decisions from host mirrors ------------------------------------------
 
@@ -136,49 +140,35 @@ class PagedScheduler(BaseScheduler):
         # host ints, no sync. Prefilled requests count: they still need rows and decoding.
         return self.num_active_cpu > 0 or bool(self.prefilled)
 
-    def _sampler_for(self, params):
-        if not self.cuda_graph:
-            return self._choose_sampler(params.sampler())
-        key = (params.temperature, params.top_k, params.top_p)   # max_new_tokens: not in the graph
-        if key not in self._graphs:                    # first call with these settings
-            self.capture_graph(params.sampler())
-            self._graphs[key] = (self.graph, self.graph_sampler)
-        self.graph, self.graph_sampler = self._graphs[key]
-        return self.graph_sampler
-
-    def _choose_sampler(self, sampler):
-        if self.graph is not None:
-            # the graph replays the sampler it was captured with; it cannot switch
-            if sampler is not None and sampler is not self.graph_sampler:
-                raise ValueError('this graph was captured with a different sampler: pass the same '
-                                 'one (or none), or capture_graph(sampler) again')
-            return self.graph_sampler
-        return sampler or greedy
+    def _prepare(self, sampling_params):
+        """Before a run (no row active): capture the decode graph for these settings if new."""
+        if self.decode_graphs:
+            self.decode_graphs.prepare(self.decode_graphs.key(sampling_params))
 
     # -- the three operations --------------------------------------------------
 
-    def _admit(self, queue, prompt_ids, sampler, max_new_tokens):
+    def _admit(self, queue, prompt_ids, sampling_params):
         """Two stages: prefilled requests take free decode rows; waiting requests are
         prefilled (one packed forward) into the prefilled buffer; then promote again so fresh
         prefills start decoding this step if rows are free."""
         self._promote()
-        self._admit_prefill(queue, prompt_ids, sampler, max_new_tokens)
+        self._admit_prefill(queue, prompt_ids, sampling_params)
         self._promote()
 
-    def _admit_prefill(self, queue, prompt_ids, sampler, max_new_tokens):
+    def _admit_prefill(self, queue, prompt_ids, sampling_params):
         """Waiting -> prefilled, in order, while prefilled rows, free blocks and the token
         budget allow; then ONE packed prefill for all of them."""
         slots, reqs, tokens = [], [], 0
         while queue and len(slots) < len(self.free_prefilled_rows):
             req, _ = queue[0]
             L = len(prompt_ids[req])
-            if L == 0 or L + max_new_tokens > self.W:
+            if L == 0 or L + sampling_params.max_new_tokens > self.W:
                 raise ValueError(f'request {req}: prompt of {L} tokens does not fit '
-                                 f'(cache width {self.W} leaves room for {self.W - max_new_tokens})')
+                                 f'(cache width {self.W} leaves room for {self.W - sampling_params.max_new_tokens})')
             if self.max_prefill_tokens and slots and tokens + L > self.max_prefill_tokens:
                 break                                 # budget spent; the first prompt always goes
 
-            need = ceil((L + max_new_tokens) / self.bs)
+            need = ceil((L + sampling_params.max_new_tokens) / self.bs)
             if need > self.allocator.capacity:
                 # would wait forever: even an empty pool cannot hold it
                 raise ValueError(f'request {req}: needs {need} blocks, the pool can never '
@@ -212,7 +202,8 @@ class PagedScheduler(BaseScheduler):
             return
 
         del self.free_prefilled_rows[:len(slots)]
-        _, first = self._prefill(slots, [prompt_ids[r] for r, _, _ in reqs], sampler)
+        first = self._prefill(slots, [prompt_ids[r] for r, _, _ in reqs], sampling_params)
+        first = first.view(-1).tolist()                          # the one sync for all of them
         for slot, (req, blocks, L), tok in zip(slots, reqs, first):
             self.generated_cpu[req] = [tok]           # the first token exists from here on
             self.prefilled.append(dict(slot=slot, req=req, blocks=blocks, length=L, token=tok))
@@ -243,17 +234,21 @@ class PagedScheduler(BaseScheduler):
                      self.allocator.num_free, self.allocator.capacity, self.num_active_cpu)
         self.peak_active = max(self.peak_active, self.num_active_cpu)
 
-    def _decode(self, sampler):
-        """One token for every row. Graph replay if captured, else the eager forward."""
-        if self.graph is not None:
-            self.graph.replay()                       # one launch replaces hundreds
-        else:
-            logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
-                                   pos_ids=self.cache.seq_len().unsqueeze(1),
-                                   attn_mask=self._mask(), cache_active=self.active_gpu)
-            tok = sampler(logits[:, -1, :self.enc.n_vocab])    # (B, 1), still on the GPU
-            self.next_token_gpu.copy_(tok)                # in place: the same buffer every step
-        self._record_tokens()
+    def _decode(self, sampling_params):
+        """One decode step for every row: the graph for these sampler settings (one launch
+        replaces hundreds), or the base class's eager step."""
+        if self.decode_graphs:
+            return self.decode_graphs.run(sampling_params)
+        return super()._decode(sampling_params)
+
+    def _prefill(self, rows, prompts, sampling_params):
+        """Packed prefill: one graph replay when a bucket fits, else the base class's eager
+        forward. Returns the first tokens on the device (N, 1) -- like _decode."""
+        if self.prefill_graphs:
+            first = self.prefill_graphs.run(rows, prompts, sampling_params)
+            if first is not None:                   # None: too big for any bucket
+                return first
+        return super()._prefill(rows, prompts, sampling_params)
 
     def _record_tokens(self):
         """The one device -> host copy per step, then host bookkeeping only."""
@@ -309,47 +304,6 @@ class PagedScheduler(BaseScheduler):
         self.peak_blocks = 0
         self.decode_steps = 0
         self._waiting_req = None
-
-    # -- CUDA graph: record the decode step once, replay it every step -----------
-
-    def capture_graph(self, sampler=None):
-        """Record one decode step -- forward, mask and `sampler` (default greedy). Call
-        once after __init__, on CUDA. run() then always uses this sampler.
-
-        The sampler must be capturable: tensor ops only, no reads back to the CPU.
-        Everything in inference/sampling.py qualifies.
-
-        Safe to capture with no requests: every row is inactive, so the forward writes
-        only to the scratch block and advance() adds 0 to pos. Prefill stays eager
-        (prompt lengths vary), but writes the same pool, table and pos buffers the
-        graph reads -- so a replay sees newly admitted rows automatically.
-        """
-        assert str(self.device).startswith('cuda'), 'CUDA graphs need a CUDA device'
-        self.graph_sampler = sampler or greedy
-        with torch.inference_mode():
-            self._reset()
-            # warm up on a side stream: cuBLAS/SDPA choose kernels and allocate
-            # workspaces BEFORE capture, so no first-time setup is recorded
-            side = torch.cuda.Stream()
-            side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side):
-                for _ in range(3):
-                    self._graph_body()
-            torch.cuda.current_stream().wait_stream(side)
-            self._reset()                             # undo the warm-up, in place
-
-            self.graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(self.graph):        # record, don't run
-                self._graph_body()
-
-    def _graph_body(self):
-        """The captured work. Reads and writes only fixed buffers: next_token, active,
-        cache.pos_gpu, cache.block_table_gpu and the K/V pools -- all updated in place."""
-        logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
-                               pos_ids=self.cache.seq_len().unsqueeze(1),
-                               attn_mask=self._mask(), cache_active=self.active_gpu)
-        tok = self.graph_sampler(logits[:, -1, :self.enc.n_vocab])        # on the GPU
-        self.next_token_gpu.copy_(tok)
 
 
 def _short(blocks, n=6):

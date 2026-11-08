@@ -63,14 +63,14 @@ def main():
     log.info('loading %s …', args.checkpoint)
     llm = LLM(args.checkpoint, engine='paged', device=args.device, max_seqs=args.max_seqs,
               block_size=args.block_size, cuda_graph=args.cuda_graph)
-    params = SamplingParams(max_new_tokens=args.max_new, temperature=args.temperature,
+    sampling_params = SamplingParams(max_new_tokens=args.max_new, temperature=args.temperature,
                             top_k=args.top_k)
-    llm.generate(['Hello'], SamplingParams(max_new_tokens=2, temperature=params.temperature,
-                                           top_k=params.top_k))            # warm-up (+ graph)
+    llm.generate(['Hello'], SamplingParams(max_new_tokens=2, temperature=sampling_params.temperature,
+                                           top_k=sampling_params.top_k))            # warm-up (+ graph)
 
     info = dict(checkpoint=Path(args.checkpoint).name, block_size=args.block_size,
                 num_blocks=llm.engine.allocator.num_blocks)
-    app = create_app(llm, params, history_turns=args.history_turns, info=info)
+    app = create_app(llm, sampling_params, history_turns=args.history_turns, info=info)
     log.info('ready: http://%s:%d  (API docs at /docs, log level %s%s)', args.host, args.port,
              args.log_level, f', also -> {args.log_file}' if args.log_file else '')
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower(),

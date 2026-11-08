@@ -97,9 +97,9 @@ class Engine(threading.Thread):
         self.inbox = queue.Queue()
         self.runs = 0
 
-    def submit(self, prompt, params):
+    def submit(self, prompt, sampling_params):
         """Thread-safe: queue a job, return a Future the caller can await."""
-        job = dict(prompt=prompt, params=params, future=Future())
+        job = dict(prompt=prompt, sampling_params=sampling_params, future=Future())
         self.inbox.put(job)
         return job['future']
 
@@ -114,16 +114,16 @@ class Engine(threading.Thread):
                     break
             groups = {}                                  # one generate() per sampler setting
             for job in jobs:
-                groups.setdefault(job['params'], []).append(job)
-            for params, group in groups.items():
-                self._run_group(params, group, len(jobs))
+                groups.setdefault(job['sampling_params'], []).append(job)
+            for sampling_params, group in groups.items():
+                self._run_group(sampling_params, group, len(jobs))
 
-    def _run_group(self, params, group, gathered):
+    def _run_group(self, sampling_params, group, gathered):
         engine = self.llm.engine
-        log.info('batch %d: %d request(s) -> engine (%s)', self.runs + 1, len(group), params)
+        log.info('batch %d: %d request(s) -> engine (%s)', self.runs + 1, len(group), sampling_params)
         t0 = time.perf_counter()
         try:
-            outs = engine.generate([j['prompt'] for j in group], params)
+            outs = engine.generate([j['prompt'] for j in group], sampling_params)
         except Exception as e:                           # report to every caller, keep serving
             for job in group:
                 job['future'].set_exception(e)
@@ -185,10 +185,10 @@ def _clip(text, n=100):
 
 # -- the app ------------------------------------------------------------------------------
 
-def create_app(llm, params=None, history_turns=0, gather_window=0.03, info=None):
-    """params: the SamplingParams the chat page uses (default: temperature 0.8, top-k 40,
+def create_app(llm, sampling_params=None, history_turns=0, gather_window=0.03, info=None):
+    """sampling_params: the SamplingParams the chat page uses (default: temperature 0.8, top-k 40,
     64 new tokens). The /v1 routes take theirs from each request."""
-    params = params or SamplingParams(max_new_tokens=64, temperature=0.8, top_k=40)
+    sampling_params = sampling_params or SamplingParams(max_new_tokens=64, temperature=0.8, top_k=40)
     max_batch = getattr(llm.engine, 'B', 8)
     engine = Engine(llm, max_batch=max_batch, gather_window=gather_window)
     enc, context = llm.enc, llm.config.block_size
@@ -231,16 +231,16 @@ def create_app(llm, params=None, history_turns=0, gather_window=0.03, info=None)
     @app.get('/api/info')
     async def api_info():
         return dict(info or {}, device=llm.device, engine=llm.engine_name,
-                    max_seqs=max_batch, temperature=params.temperature,
-                    max_new=params.max_new_tokens, history_turns=history_turns, runs=engine.runs)
+                    max_seqs=max_batch, temperature=sampling_params.temperature,
+                    max_new=sampling_params.max_new_tokens, history_turns=history_turns, runs=engine.runs)
 
     @app.post('/api/chat')
     async def api_chat(req: UIChatRequest):
         messages = [m.model_dump() for m in req.messages]
-        prompt = render(messages, enc, context - params.max_new_tokens, history_turns)
+        prompt = render(messages, enc, context - sampling_params.max_new_tokens, history_turns)
         log.info('user: %s', _clip(messages[-1]['content']))
         log.debug('prompt (%d tokens):\n%s', len(enc.encode(prompt)), prompt)
-        out = await generate(prompt, params)
+        out = await generate(prompt, sampling_params)
         reply = cut(out['text'], CHAT_STOPS)[0].strip() or '…'
         log.debug('raw output (before the cut at the first newline):\n%s', out['text'])
         log.info('reply: %s  [%s]', _clip(reply), ', '.join(f'{k}={v}' for k, v in out['stats'].items()))

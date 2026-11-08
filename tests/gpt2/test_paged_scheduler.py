@@ -214,19 +214,19 @@ def test_graph_decode_matches_eager(parts):
     model = model.to('cuda')
     prompts = PROMPTS * 3
     eager = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W, device='cuda')
-    graphed = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W, device='cuda')
-    graphed.capture_graph()
+    graphed = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W,
+                             device='cuda', cuda_graph=True)
     assert graphed.run(prompts, max_new_tokens=6) == eager.run(prompts, max_new_tokens=6)
+    assert len(graphed.decode_graphs) == 1, 'greedy run() should replay the greedy graph'
     assert graphed.allocator.num_free == graphed.allocator.capacity
 
 
-def test_graph_refuses_a_different_sampler(parts):
-    """The graph replays the sampler it recorded; asking for another must fail loudly."""
+def test_cuda_graph_is_ignored_off_cuda(parts):
     model, enc, cfg = parts
-    s = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W)
-    s.graph, s.graph_sampler = object(), (lambda logits: logits.argmax(-1, keepdim=True))
-    with pytest.raises(ValueError, match='different sampler'):
-        s.run(PROMPTS, max_new_tokens=2, sampler=lambda logits: logits.argmax(-1, keepdim=True))
+    s = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W, cuda_graph=True)
+    assert s.decode_graphs is None
+    assert s.run(PROMPTS, max_new_tokens=3) == PagedScheduler(
+        model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W).run(PROMPTS, max_new_tokens=3)
 
 
 # -- the Triton kernel (always on CUDA) ------------------------------------------------
@@ -242,9 +242,7 @@ def test_cuda_paged_engine_matches_the_row_scheduler(parts, graph):
     expected = Scheduler(model, enc, cfg, batch_size=2, max_tokens=W, device='cuda').run(
         prompts, max_new_tokens=6)
     sched = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W,
-                           device='cuda')
-    if graph:
-        sched.capture_graph()
+                           device='cuda', cuda_graph=graph)
     assert sched.run(prompts, max_new_tokens=6) == expected
     assert sched.allocator.num_free == sched.allocator.capacity
 
@@ -347,3 +345,35 @@ def test_one_prefilled_row_still_serves_everything(parts):
                          prefilled_rows=1).run(prompts, max_new_tokens=5)
     expected = Scheduler(model, enc, cfg, batch_size=2, max_tokens=W).run(prompts, max_new_tokens=5)
     assert got == expected
+
+
+# -- prefill CUDA graphs ----------------------------------------------------------------
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA graphs need CUDA')
+def test_prefill_graphs_match_eager(parts):
+    """Packed prefill replayed from bucket graphs: same text as the eager engine, padding
+    confined to the pad row (still all scratch afterwards)."""
+    from inference.continuous_batch.paged.block_allocator import SCRATCH
+    model, enc, cfg = parts
+    model = model.to('cuda')
+    prompts = PROMPTS * 3                                  # several waves, varied prompt counts
+    eager = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W, device='cuda')
+    graphed = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W,
+                             device='cuda', cuda_graph=True)
+    assert graphed.run(prompts, max_new_tokens=6) == eager.run(prompts, max_new_tokens=6)
+    assert len(graphed.prefill_graphs) >= 1, 'no prefill bucket was ever replayed'
+    assert torch.all(graphed.cache.block_table_gpu[graphed.cache.pad_row] == SCRATCH)
+    assert graphed.allocator.num_free == graphed.allocator.capacity
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA graphs need CUDA')
+def test_oversized_prefill_falls_back_to_eager(parts):
+    """A batch bigger than every bucket runs the eager prefill -- same text, nothing captured."""
+    model, enc, cfg = parts
+    model = model.to('cuda')
+    graphed = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W,
+                             device='cuda', cuda_graph=True)
+    graphed.prefill_graphs.buckets = (4,)                  # every real batch overflows it
+    eager = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W, device='cuda')
+    assert graphed.run(PROMPTS, max_new_tokens=4) == eager.run(PROMPTS, max_new_tokens=4)
+    assert len(graphed.prefill_graphs) == 0

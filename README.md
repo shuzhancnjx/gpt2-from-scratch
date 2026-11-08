@@ -190,8 +190,8 @@ GPU except for the sampled tokens.
 ### The decode step's two fast paths (CUDA)
 
 ```python
-sched = PagedScheduler(model, enc, cfg, max_seqs=32, device='cuda', dtype=torch.float16)
-sched.capture_graph()                        # record the decode step; replay it each step
+sched = PagedScheduler(model, enc, cfg, max_seqs=32, device='cuda', dtype=torch.float16,
+                       cuda_graph=True)     # decode step replayed as a CUDA graph
 sched.run(prompts, max_new_tokens=128)
 ```
 
@@ -200,9 +200,10 @@ sched.run(prompts, max_new_tokens=128)
 | CUDA (always) | `paged_attention.py`, the Triton kernel: walks the block table up to each row's real length with an online softmax, reading K/V straight from the pool. Decode: one row per request. Prefill: one row per prompt token, all prompts in one launch |
 | CPU / Apple GPU | the same attention as SDPA: per-prompt causal for prefill, gather + mask for decode (Triton runs only on NVIDIA GPUs) |
 
-`capture_graph()` replays the whole decode step (forward, mask, sampler) with one
-launch. Prefill, admission and retirement stay outside the graph; they write the same
-fixed buffers the graph reads. Measured on an A100 (32 requests, gather path):
+With `cuda_graph=True`, `DecodeGraphs` (`paged/graph/decode_graph.py`) replays the whole
+decode step (forward, mask, sampler) with one launch -- one graph per sampler setting,
+captured before the first run that needs it. Prefill, admission and retirement stay
+outside the graph; they write the same fixed buffers the graph reads. Measured on an A100 (32 requests, gather path):
 10.3 -> 3.9 ms per decode step. Details and the remaining bottlenecks are in
 `docs/benchmarks/paging.md` and `docs/learning-plan.md`.
 

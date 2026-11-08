@@ -122,9 +122,11 @@ def main():
         elif budget:
             print(f'  budget {budget}: this scheduler has no max_prefill_tokens -- skipped')
             continue
+        if args.graph and not hasattr(PagedScheduler, 'capture_graph'):
+            kwargs['cuda_graph'] = True                  # graphs captured per sampler setting
         sched = PagedScheduler(model, enc, cfg, **kwargs)
-        if args.graph:
-            sched.capture_graph()
+        if args.graph and hasattr(sched, 'capture_graph'):
+            sched.capture_graph()                        # older code: one explicit capture
         sched.run(prompts[:2], max_new_tokens=2)                          # warm-up
         rec = instrument(sched)
         synchronize(device)

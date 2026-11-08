@@ -229,28 +229,47 @@ def test_graph_refuses_a_different_sampler(parts):
         s.run(PROMPTS, max_new_tokens=2, sampler=lambda logits: logits.argmax(-1, keepdim=True))
 
 
-# -- Triton decode kernel wired in (P1.5b) ------------------------------------------
+# -- the Triton kernel (always on CUDA) ------------------------------------------------
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='Triton needs CUDA')
 @pytest.mark.parametrize('graph', [False, True])
-def test_decode_kernel_matches_the_row_scheduler(parts, graph):
-    """Decode through the paged kernel (eager and graph-captured): same text as the
-    row engine, with requests joining and leaving mid-run."""
+def test_cuda_paged_engine_matches_the_row_scheduler(parts, graph):
+    """On CUDA the paged engine attends with the Triton kernel (prefill and decode, eager
+    and graph-captured): same text as the row engine, requests joining mid-run."""
     model, enc, cfg = parts
     model = model.to('cuda')
     prompts = PROMPTS * 3
     expected = Scheduler(model, enc, cfg, batch_size=2, max_tokens=W, device='cuda').run(
         prompts, max_new_tokens=6)
     sched = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W,
-                           device='cuda', decode_kernel=True)
+                           device='cuda')
     if graph:
         sched.capture_graph()
     assert sched.run(prompts, max_new_tokens=6) == expected
     assert sched.allocator.num_free == sched.allocator.capacity
 
 
-def test_decode_kernel_refuses_a_non_cuda_device(parts):
+# -- P1.7a: prefill attends over the prompt only ----------------------------------------
+
+def test_prefill_never_gathers(parts, monkeypatch):
+    """Prefill reads nothing back from the pool: only decode (all rows) may gather."""
     model, enc, cfg = parts
-    with pytest.raises(ValueError, match='CUDA'):
-        PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W,
-                       device='cpu', decode_kernel=True)
+    from inference.continuous_batch.paged.paged_cache import PagedKVCache
+    widths, original = [], PagedKVCache._gather
+
+    def spy(self, pool, sel):
+        widths.append(sel.stop - sel.start)
+        return original(self, pool, sel)
+
+    monkeypatch.setattr(PagedKVCache, '_gather', spy)
+    PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W).run(PROMPTS, max_new_tokens=3)
+    assert widths and all(w == 3 for w in widths), 'a 1-row gather means prefill read its row back'
+
+
+def test_prefill_still_stores_the_prompt_for_decode(parts):
+    """The prompt's k/v must land in the pool even though prefill doesn't read them:
+    decode attends over them. Identical text to the uncached path proves it."""
+    model, enc, cfg = parts
+    got = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W).run(
+        PROMPTS, max_new_tokens=8)
+    assert got == [greedy_reference(model, enc, p, 8) for p in PROMPTS]

@@ -1,7 +1,12 @@
-"""Paged decode attention in Triton (P1.5a).
+"""Paged attention in Triton (P1.5a): one query per row, K/V read through the block table.
 
-Reads K/V straight from the block pool through the block table -- no gather to the
-full width W, no mask. One program per (request, head).
+Reads K/V straight from the block pool -- no gather to the full width W, no mask.
+One program per (row, head); row r attends over the first seq_lens[r] tokens of the
+sequence its block-table row describes.
+
+    decode   one row per request: its new token, seq_len = pos + 1
+    prefill  one row per PROMPT TOKEN: token t of a prompt uses its request's block
+             table and seq_len = t + 1 -- causal attention, every prompt in one launch
 
 Triton needs an NVIDIA GPU: this module imports on Colab, not on the Mac.
 """
@@ -12,7 +17,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _paged_decode_kernel(
+def _paged_attention_kernel(
     query_ptr, key_pool_ptr, value_pool_ptr, block_table_ptr, seq_lens_ptr, output_ptr, 
     query_row_stride,  query_head_stride, pool_block_stride, pool_token_stride,  pool_head_stride, table_row_stride, 
     soft_max_scale, 
@@ -65,13 +70,13 @@ def _paged_decode_kernel(
     tl.store(output_ptr + request * query_row_stride + head * query_head_stride + dim_offsets, 
                 attention_output.to(output_ptr.dtype.element_ty))
 
-def paged_decode_attention(query, key_pool, value_pool, block_table, seq_lens):
+def paged_attention(query, key_pool, value_pool, block_table, seq_lens):
     """
-    query        (B, H, D)                       one new token per request
+    query        (B, H, D)                       one query per row
     key_pool     (num_blocks, block_size, H, D)  PagedKVCache.key[layer]
     value_pool   (num_blocks, block_size, H, D)  PagedKVCache.value[layer]
-    block_table  (B, max_blocks), int            logical -> physical block per request
-    seq_lens     (B,), int                       real tokens per request, incl. the one just written
+    block_table  (B, max_blocks), int            logical -> physical block per row
+    seq_lens     (B,), int                       tokens each row attends over, incl. its own
     returns      (B, H, D)
     """
 
@@ -85,7 +90,7 @@ def paged_decode_attention(query, key_pool, value_pool, block_table, seq_lens):
 
     output = torch.empty_like(query)
 
-    _paged_decode_kernel[(num_requests, num_head)](
+    _paged_attention_kernel[(num_requests, num_head)](
         query,  key_pool, value_pool, block_table, seq_lens, output,
         query_row_stride=query.stride(0), 
         query_head_stride=query.stride(1), 

@@ -49,35 +49,35 @@ def make(dtype, seq_lens=SEQ_LENS, H=12, D=64, block_size=16, max_blocks=64, num
 
 @pytest.mark.parametrize('dtype, tol', [(torch.float32, 1e-4), (torch.float16, 2e-3)])
 def test_matches_the_gather_path(dtype, tol):
-    from inference.continuous_batch.paged.paged_attention import paged_decode_attention
+    from inference.continuous_batch.paged.paged_attention import paged_attention
     args = make(dtype)
-    torch.testing.assert_close(paged_decode_attention(**args), reference(**args), atol=tol, rtol=tol)
+    torch.testing.assert_close(paged_attention(**args), reference(**args), atol=tol, rtol=tol)
 
 
 @pytest.mark.parametrize('seq_len', SEQ_LENS)
 def test_each_length_on_its_own(seq_len):
     """Pinpoints which edge fails, if the batched test does."""
-    from inference.continuous_batch.paged.paged_attention import paged_decode_attention
+    from inference.continuous_batch.paged.paged_attention import paged_attention
     args = make(torch.float32, seq_lens=[seq_len])
-    torch.testing.assert_close(paged_decode_attention(**args), reference(**args), atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(paged_attention(**args), reference(**args), atol=1e-4, rtol=1e-4)
 
 
 def test_never_reads_past_the_real_length():
     """Overwrite every slot beyond each row's length: the output must not move."""
-    from inference.continuous_batch.paged.paged_attention import paged_decode_attention
+    from inference.continuous_batch.paged.paged_attention import paged_attention
     args = make(torch.float32)
-    before = paged_decode_attention(**args)
+    before = paged_attention(**args)
     block_size = args['key_pool'].shape[1]
     for r, L in enumerate(args['seq_lens'].tolist()):
         for j, phys in enumerate(args['block_table'][r].tolist()):
             first_stale = max(0, L - j * block_size)
             args['key_pool'][phys, first_stale:] = 1e4
             args['value_pool'][phys, first_stale:] = 1e4
-    torch.testing.assert_close(paged_decode_attention(**args), before)
+    torch.testing.assert_close(paged_attention(**args), before)
 
 
 def test_output_shape_and_dtype():
-    from inference.continuous_batch.paged.paged_attention import paged_decode_attention
+    from inference.continuous_batch.paged.paged_attention import paged_attention
     args = make(torch.float16)
-    out = paged_decode_attention(**args)
+    out = paged_attention(**args)
     assert out.shape == args['query'].shape and out.dtype == torch.float16

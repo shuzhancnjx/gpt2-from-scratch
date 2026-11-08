@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from model.gpt2.gpt import GPTConfig
+from inference.base_kv_cache import PrefillBatch
 from inference.continuous_batch import RowKVCache
 
 TINY = dict(vocab_size=64, n_layer=2, n_head=2, n_embd=32, block_size=32,
@@ -32,11 +33,18 @@ def kv(B, T, config, fill):
     return torch.full((B, config.n_head, T, hs), float(fill))
 
 
+def prefill(cache, layer, row, k, advance=True):
+    """Prefill one prompt into `row` the way the scheduler does: a 1-prompt PrefillBatch."""
+    batch = PrefillBatch.build([row], [k.size(2)], 'cpu')
+    cache.write(layer, k, k, batch)
+    if advance:
+        cache.advance(k.size(2), prefill=batch)
+
+
 # -- prefill -----------------------------------------------------------------
 
 def test_prefill_writes_one_row_from_slot_zero(cache, config):
-    cache.update(0, kv(1, 5, config, 1.0), kv(1, 5, config, 1.0), req_pool_idx=1)
-    cache.advance(5, req_pool_idx=1)
+    prefill(cache, 0, 1, kv(1, 5, config, 1.0))
 
     assert cache.pos_gpu.tolist() == [0, 5, 0], 'only row 1 should have advanced'
     assert torch.all(cache.key[0][1, :, :5] == 1.0)
@@ -45,20 +53,17 @@ def test_prefill_writes_one_row_from_slot_zero(cache, config):
     assert torch.all(cache.key[0][2] == 0.0), 'row 2 was touched'
 
 
-def test_prefill_returns_a_view_not_a_copy(cache, config):
-    """Attention reads the returned buffer; a copy would cost ~10MB per layer."""
-    k, _ = cache.update(0, kv(1, 4, config, 2.0), kv(1, 4, config, 2.0), req_pool_idx=2)
+def test_packed_prefill_writes_each_prompt_into_its_own_row(cache, config):
+    """Two prompts packed end to end: each lands in its row from slot 0, nowhere else."""
+    k = torch.cat([kv(1, 3, config, 1.0), kv(1, 5, config, 2.0)], dim=2)     # (1, H, 8, D)
+    batch = PrefillBatch.build([2, 0], [3, 5], 'cpu')
+    cache.write(0, k, k, batch)
+    cache.advance(8, prefill=batch)
 
-    assert k.shape == (1, config.n_head, cache.width, config.n_embd // config.n_head)
-    assert k._base is cache.key[0], 'returned a copy -- use basic slicing, not fancy indexing'
-
-
-def test_prefill_into_an_occupied_row_is_rejected(cache, config):
-    cache.update(0, kv(1, 5, config, 1.0), kv(1, 5, config, 1.0), req_pool_idx=0)
-    cache.advance(5, req_pool_idx=0)
-
-    with pytest.raises(AssertionError):
-        cache.update(0, kv(1, 3, config, 1.0), kv(1, 3, config, 1.0), req_pool_idx=0)
+    assert cache.pos_gpu.tolist() == [5, 0, 3]
+    assert torch.all(cache.key[0][2, :, :3] == 1.0) and torch.all(cache.key[0][2, :, 3:] == 0.0)
+    assert torch.all(cache.key[0][0, :, :5] == 2.0) and torch.all(cache.key[0][0, :, 5:] == 0.0)
+    assert torch.all(cache.key[0][1] == 0.0), 'row 1 was not in the batch'
 
 
 # -- decode ------------------------------------------------------------------
@@ -67,7 +72,7 @@ def test_decode_writes_each_row_at_its_own_pos(cache, config):
     """The core of continuous batching: rows sit at different lengths."""
     cache.pos_gpu = torch.tensor([2, 7, 0])
 
-    cache.update(0, kv(3, 1, config, 9.0), kv(3, 1, config, 9.0))
+    cache.write(0, kv(3, 1, config, 9.0), kv(3, 1, config, 9.0))
 
     for row, col in enumerate([2, 7, 0]):
         assert torch.all(cache.key[0][row, :, col] == 9.0), f'row {row} missed slot {col}'
@@ -92,8 +97,7 @@ def test_advance_skips_inactive_rows(cache):
 
 def test_release_frees_one_row_only(cache, config):
     for row in range(3):
-        cache.update(0, kv(1, 4, config, row + 1.0), kv(1, 4, config, row + 1.0), req_pool_idx=row)
-        cache.advance(4, req_pool_idx=row)
+        prefill(cache, 0, row, kv(1, 4, config, row + 1.0))
 
     cache.release(1)
 
@@ -104,12 +108,9 @@ def test_release_frees_one_row_only(cache, config):
 
 
 def test_released_row_accepts_a_new_request(cache, config):
-    cache.update(0, kv(1, 6, config, 1.0), kv(1, 6, config, 1.0), req_pool_idx=0)
-    cache.advance(6, req_pool_idx=0)
+    prefill(cache, 0, 0, kv(1, 6, config, 1.0))
     cache.release(0)
-
-    cache.update(0, kv(1, 2, config, 5.0), kv(1, 2, config, 5.0), req_pool_idx=0)
-    cache.advance(2, req_pool_idx=0)
+    prefill(cache, 0, 0, kv(1, 2, config, 5.0))
 
     assert int(cache.pos_gpu[0]) == 2
     assert torch.all(cache.key[0][0, :, :2] == 5.0)
@@ -119,10 +120,11 @@ def test_released_row_accepts_a_new_request(cache, config):
 # -- layer lockstep ----------------------------------------------------------
 
 def test_all_layers_stay_in_lockstep(cache, config):
-    """advance() belongs to the caller, once per forward -- never inside update()."""
+    """advance() belongs to the caller, once per forward -- never inside write()."""
+    batch = PrefillBatch.build([0], [3], 'cpu')
     for layer in range(len(cache.key)):
-        cache.update(layer, kv(1, 3, config, 1.0), kv(1, 3, config, 1.0), req_pool_idx=0)
-    cache.advance(3, req_pool_idx=0)
+        cache.write(layer, kv(1, 3, config, 1.0), kv(1, 3, config, 1.0), batch)
+    cache.advance(3, prefill=batch)
 
     assert int(cache.pos_gpu[0]) == 3, 'pos moved per layer instead of per forward'
     for layer in range(len(cache.key)):
@@ -258,8 +260,8 @@ def test_decode_feeds_per_row_positions_and_leaves_idle_slots_alone(sched_parts)
     real = sched.model
 
     def spy(idx, **kwargs):
-        # req_pool_idx, not idx width: a one-token prompt prefills with T == 1 too
-        if kwargs.get('req_pool_idx') is None:        # decode, not prefill
+        # the prefill batch, not idx width: a one-token prompt prefills with T == 1 too
+        if kwargs.get('prefill') is None:             # decode, not prefill
             seen.append((kwargs['pos_ids'].flatten().tolist(),
                          sched.cache.pos_gpu.tolist(),
                          sched.active_gpu.tolist()))

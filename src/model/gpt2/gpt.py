@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 if TYPE_CHECKING:                       # names the cache contract; no import at run time
-    from inference.base_kv_cache import BaseKVCache
+    from inference.base_kv_cache import BaseKVCache, PrefillBatch
 
 
 @dataclass
@@ -35,7 +35,7 @@ class CausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x, kv_cache: 'BaseKVCache | None' = None, layer_idx=None, attn_mask=None,
-                req_pool_idx=None):
+                prefill: 'PrefillBatch | None' = None):
         B, T, C = x.shape
 
         q, k, v = self.c_attn(x).split(self.config.n_embd, dim=2)
@@ -44,33 +44,28 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.config.n_head, self.head_size).transpose(1, 2)
         v = v.view(B, T, self.config.n_head, self.head_size).transpose(1, 2)
 
-        drop_out = self.config.dropout if self.training else 0.0
-        if kv_cache is not None and req_pool_idx is None and kv_cache.fused_decode:
-            # decode on a paged cache with a fused kernel: the cache writes k/v and
-            # attends in one call (no gathered buffers, no mask)
-            y = kv_cache.decode_attention(layer_idx, q, k, v)       # B, NH, 1, H
+        if prefill is not None:
+            # prefill: packed prompts. The cache stores their k/v and attends causally
+            # within each prompt.
+            y = kv_cache.prefill_attend(layer_idx, q, k, v, prefill)
         elif kv_cache is not None:
-            k, v = kv_cache.update(layer_idx, k, v, req_pool_idx=req_pool_idx)
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_out)
-        elif attn_mask is not None: 
-            y = F.scaled_dot_product_attention(
-                q, k, v, 
-                attn_mask=attn_mask, 
-                dropout_p=drop_out,
-            )
-        else: 
-            # flash attention: fuses the mask/softmax/dropout and never materializes T x T
-            y = F.scaled_dot_product_attention(
-                q, k, v, 
-                is_causal=(q.size(2) == k.size(2)), # to distinguish prefill or one token decoding
-                dropout_p=drop_out,
-            )  # B, NH, T, H
+            # decode: the cache stores the new k/v and attends over its contents.
+            y = kv_cache.decode_attend(layer_idx, q, k, v, attn_mask)
+        else:
+            # training / evaluation: the whole sequence, causally.
+            y = self.train_attend(q, k, v)
 
         y = y.transpose(1, 2).contiguous().view(B, T, self.head_size * self.config.n_head)
         y = self.c_proj(y)
         y = self.resid_dropout(y)
 
         return y
+
+    def train_attend(self, q, k, v):
+        """Training / evaluation: causal attention over the whole sequence (FlashAttention).
+        Dropout on the attention weights only while training."""
+        dropout_p = self.config.dropout if self.training else 0.0
+        return F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
 
 
 class MLP(nn.Module):
@@ -99,9 +94,9 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x, kv_cache=None, layer_idx=None, attn_mask=None, req_pool_idx=None):
+    def forward(self, x, kv_cache=None, layer_idx=None, attn_mask=None, prefill=None):
         x = x + self.attn(self.ln_1(x), kv_cache=kv_cache, layer_idx=layer_idx,
-                          attn_mask=attn_mask, req_pool_idx=req_pool_idx)
+                          attn_mask=attn_mask, prefill=prefill)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -136,14 +131,16 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None, kv_cache: 'BaseKVCache | None' = None, pos_ids=None, attn_mask=None,
-                req_pool_idx=None, cache_active=None):
+                prefill: 'PrefillBatch | None' = None, cache_active=None):
 
-        assert not (kv_cache is not None and attn_mask is None), 'a full-width cache needs a mask to hide unwritten slots'
+        assert not (kv_cache is not None and prefill is None and attn_mask is None), \
+            'reading a full-width cache needs a mask to hide unwritten slots'
 
         B, T = idx.shape
 
-        assert T <= self.config.block_size, \
-            f'cannot forward sequence of length {T}, block size {self.config.block_size}'
+        longest = max(prefill.lens) if prefill is not None else T     # packed: limit is per prompt
+        assert longest <= self.config.block_size, \
+            f'cannot forward a sequence of length {longest}, block size {self.config.block_size}'
 
         token_embd = self.transformer.wte(idx)
 
@@ -163,11 +160,13 @@ class GPT(nn.Module):
 
         for i, block in enumerate(self.transformer.h):
             x = block(x, kv_cache=kv_cache, layer_idx=i, attn_mask=sdpa_mask,
-                      req_pool_idx=req_pool_idx)
+                      prefill=prefill)
         if kv_cache is not None: 
-            kv_cache.advance(T, req_pool_idx=req_pool_idx, active=cache_active)
+            kv_cache.advance(T, prefill=prefill, active=cache_active)
 
         x = self.transformer.ln_f(x)
+        if prefill is not None:
+            x = x[:, prefill.last]                  # each prompt's last token: all sampling needs
         logits = self.lm_head(x)
 
         loss = None

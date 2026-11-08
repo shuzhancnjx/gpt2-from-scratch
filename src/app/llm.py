@@ -1,7 +1,7 @@
 """LLM: the one front door for generation.
 
     llm = LLM('runs/keep/gpt2_124M_step013147.pt', engine='paged', device='cuda',
-              decode_kernel=True, cuda_graph=True)
+              cuda_graph=True)
     llm.generate(['The capital of France is'], SamplingParams(max_new_tokens=64, temperature=0.8))
 
 LLM loads the model once (model.gpt2.loading), builds the chosen engine, and forwards
@@ -11,7 +11,7 @@ generate() to it. Every engine implements BaseEngine, so the call is the same fo
     engine='row'     Scheduler        continuous batching, a full-width KV row per request
     engine='paged'   PagedScheduler   continuous batching over KV blocks (the default)
 
-Engine options are passed through: max_seqs / block_size / num_blocks / decode_kernel /
+Engine options are passed through: max_seqs / block_size / num_blocks /
 cuda_graph for 'paged', batch_size for 'row'. max_tokens (the KV width per request)
 defaults to the model's context length.
 """

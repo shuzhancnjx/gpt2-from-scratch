@@ -3,7 +3,6 @@
     python scripts/bench_paging.py                          # 124M config, auto device
     python scripts/bench_paging.py --model tiny --device cpu
     python scripts/bench_paging.py --graph                  # CUDA: also the CUDA-graph decode
-    python scripts/bench_paging.py --graph --kernel         # CUDA: also with the Triton decode kernel
 
 Both engines get the same KV budget: RowKVCache with `--row-slots` full-width rows,
 and a block pool holding exactly as many tokens (+1 scratch block) shared by up to
@@ -76,9 +75,6 @@ def main():
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--graph', action='store_true',
                    help='CUDA only: also run the paged engine with its decode step in a CUDA graph')
-    p.add_argument('--kernel', action='store_true',
-                   help='CUDA only: also run the paged engine with the Triton decode-attention '
-                        'kernel (and graph + kernel when --graph is given)')
     p.add_argument('--out', default='results/bench_paging.json')
     args = p.parse_args()
 
@@ -112,18 +108,6 @@ def main():
                                                 max_tokens=W, device=device, dtype=dtype)
         engines['paged+graph'].capture_graph()
         reserved['paged+graph'] = reserved['paged']
-    if args.kernel:
-        if not device.startswith('cuda'):
-            raise SystemExit('--kernel needs a CUDA device')
-        variants = ['paged+kernel'] + (['paged+graph+kernel'] if args.graph else [])
-        for name in variants:
-            engines[name] = PagedScheduler(model, enc, cfg, max_seqs=args.paged_seqs,
-                                           block_size=args.block_size, num_blocks=num_blocks,
-                                           max_tokens=W, device=device, dtype=dtype,
-                                           decode_kernel=True)
-            reserved[name] = reserved['paged']
-        if args.graph:
-            engines['paged+graph+kernel'].capture_graph()
 
     print(f'device: {device} ({device_name(device)})  dtype: {dtype}  model: {args.model}  '
           f'W={W}  prompts={args.num_prompts} ({args.prompt_min}-{args.prompt_max} tok)  '

@@ -44,35 +44,27 @@ class Scheduler(BaseScheduler):
     # -- the three operations ----------------------------------------------
 
     def _admit(self, queue, prompt_ids, sampler, max_new_tokens):
-        """Prefill queued requests into free slots, one batch-of-1 forward each.
-
-        Prompts of different lengths never share a tensor, which is exactly why
-        no padding is needed anywhere in this file.
-        """
+        """Fill every free slot from the queue, then prefill them all in one forward."""
+        rows, reqs = [], []
         for row in range(self.B):
-            if self.active_gpu[row] or not queue:
+            if not queue:
+                break
+            if self.active_gpu[row]:
                 continue
-
             req, _ = queue.popleft()
-            ids = prompt_ids[req]
-            L = len(ids)
+            L = len(prompt_ids[req])
             if L == 0 or L + max_new_tokens > self.W:
-                results_len = self.W - max_new_tokens
                 raise ValueError(f'request {req}: prompt of {L} tokens does not fit '
-                                 f'(cache width {self.W} leaves room for {results_len})')
+                                 f'(cache width {self.W} leaves room for {self.W - max_new_tokens})')
+            rows.append(row)
+            reqs.append(req)
+        if not rows:
+            return
 
-            idx = torch.tensor([ids], dtype=torch.long, device=self.device)
-            pos_ids = torch.arange(L, device=self.device).unsqueeze(0)
-            mask = (torch.arange(self.W, device=self.device) < L).unsqueeze(0)
-
-            logits, _ = self.model(idx, kv_cache=self.cache, pos_ids=pos_ids,
-                                   attn_mask=mask, req_pool_idx=row)
-
-            tok = sampler(logits[:, -1, :self.enc.n_vocab])
-            self.next_token_gpu[row] = tok
-            self.active_gpu[row] = True
+        first = self._prefill(rows, [prompt_ids[r] for r in reqs], sampler)
+        for row, req, tok in zip(rows, reqs, first):
             self.slot_req_cpu[row] = req
-            self.generated_cpu[req] = [int(tok)]
+            self.generated_cpu[req] = [tok]
 
     def _decode(self, sampler):
         """One token for every row, each writing at its own pos."""

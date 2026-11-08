@@ -40,7 +40,7 @@ class PagedScheduler(BaseScheduler):
 
     def __init__(self, model, enc, config, max_seqs=4, block_size=16, num_blocks=None,
                  max_tokens=None, watermark=0, device='cpu', dtype=torch.float32,
-                 decode_kernel=False, cuda_graph=False):
+                 cuda_graph=False):
         super().__init__(model, enc, config, max_seqs, max_tokens, device)
         if self.W % block_size:
             # the gathered width must equal W, or the shared mask no longer lines up
@@ -52,8 +52,7 @@ class PagedScheduler(BaseScheduler):
 
         self.allocator = BlockAllocator(num_blocks)
         self.cache = PagedKVCache(config, num_blocks, block_size, max_seqs,
-                                  self.W // block_size, device, dtype,
-                                  decode_kernel=decode_kernel)   # Triton decode attention
+                                  self.W // block_size, device, dtype)
 
         # host mirrors: every scheduling decision reads these, never the GPU
         self.row_blocks_cpu = [[] for _ in range(self.B)]
@@ -97,16 +96,17 @@ class PagedScheduler(BaseScheduler):
     # -- the three operations --------------------------------------------------
 
     def _admit(self, queue, prompt_ids, sampler, max_new_tokens):
-        """Admit queued requests, in order, while free slots AND free blocks allow."""
+        """Admit queued requests, in order, while free rows AND free blocks allow; then
+        prefill everything admitted this step in ONE packed forward."""
+        rows, reqs = [], []
         for row in range(self.B):
             if not queue:
-                return
+                break
             if self.active_cpu[row]:
                 continue
 
             req, _ = queue[0]
-            ids = prompt_ids[req]
-            L = len(ids)
+            L = len(prompt_ids[req])
             if L == 0 or L + max_new_tokens > self.W:
                 raise ValueError(f'request {req}: prompt of {L} tokens does not fit '
                                  f'(cache width {self.W} leaves room for {self.W - max_new_tokens})')
@@ -117,12 +117,13 @@ class PagedScheduler(BaseScheduler):
                 raise ValueError(f'request {req}: needs {need} blocks, the pool can never '
                                  f'provide more than {self.allocator.capacity} -- it will never fit')
 
-            # Headroom only matters when something is running that could free blocks.
-            # With nothing active the whole pool is free and the check above guarantees
-            # the request fits -- so ignoring the watermark here prevents a spin.
-            headroom = self.watermark if self.num_active_cpu else 0
+            # Headroom only matters when something is running (or being admitted) that will
+            # free blocks. With nothing active the whole pool is free and the check above
+            # guarantees the request fits -- so ignoring the watermark prevents a spin.
+            busy = self.num_active_cpu + len(rows)
+            headroom = self.watermark if busy else 0
             if self.allocator.num_free - need < headroom:
-                if not self.num_active_cpu:           # unreachable given the checks above
+                if not busy:                          # unreachable given the checks above
                     raise RuntimeError('no progress: the head request cannot be admitted '
                                        'into an empty pool')
                 if self._waiting_req != req:
@@ -130,37 +131,34 @@ class PagedScheduler(BaseScheduler):
                     log.info('wait   req %d needs %d blocks, %d free (headroom %d) -- '
                              'holding the queue until a request retires',
                              req, need, self.allocator.num_free, headroom)
-                return                            # FCFS: wait; later requests may not skip ahead
+                break                                 # FCFS: later requests may not skip ahead
 
             queue.popleft()
             blocks = self.allocator.allocate(need)
             self.row_blocks_cpu[row] = blocks
-            self.cache.set_blocks(row, blocks)
-
-            # prefill -- identical to Scheduler._admit
-            idx = torch.tensor([ids], dtype=torch.long, device=self.device)
-            pos_ids = torch.arange(L, device=self.device).unsqueeze(0)
-            mask = (torch.arange(self.W, device=self.device) < L).unsqueeze(0)
-            logits, _ = self.model(idx, kv_cache=self.cache, pos_ids=pos_ids,
-                                   attn_mask=mask, req_pool_idx=row)
-
-            tok = sampler(logits[:, -1, :self.enc.n_vocab])
-            self.next_token_gpu[row] = tok
-            self.active_gpu[row] = True
-            self.slot_req_cpu[row] = req
-            self.generated_cpu[req] = [int(tok)]
-
-            self.active_cpu[row] = True
-            self.row_len_cpu[row] = L
-            self.num_active_cpu += 1
-            self.peak_active = max(self.peak_active, self.num_active_cpu)
-            self.peak_blocks = max(self.peak_blocks,
-                                   self.allocator.capacity - self.allocator.num_free)
+            self.cache.set_blocks(row, blocks)        # before the prefill writes into them
+            rows.append(row)
+            reqs.append(req)
             self._waiting_req = None
+        if not rows:
+            return
+
+        first = self._prefill(rows, [prompt_ids[r] for r in reqs], sampler)
+        for row, req, tok in zip(rows, reqs, first):
+            self.slot_req_cpu[row] = req
+            self.generated_cpu[req] = [tok]
+            self.active_cpu[row] = True
+            self.row_len_cpu[row] = len(prompt_ids[req])
+            self.num_active_cpu += 1
             log.info('admit  req %d -> row %d: prompt %d tokens, %d blocks %s, '
                      '%d/%d blocks free, %d active',
-                     req, row, L, need, _short(blocks), self.allocator.num_free,
+                     req, row, len(prompt_ids[req]), len(self.row_blocks_cpu[row]),
+                     _short(self.row_blocks_cpu[row]), self.allocator.num_free,
                      self.allocator.capacity, self.num_active_cpu)
+        self.peak_active = max(self.peak_active, self.num_active_cpu)
+        self.peak_blocks = max(self.peak_blocks, self.allocator.capacity - self.allocator.num_free)
+        log.debug('prefill: %d prompt(s), %d tokens in one forward', len(rows),
+                  sum(len(prompt_ids[r]) for r in reqs))
 
     def _decode(self, sampler):
         """One token for every row. Graph replay if captured, else the eager forward."""

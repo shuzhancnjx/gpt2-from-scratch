@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from model.gpt2.gpt import GPTConfig
+from inference.base_kv_cache import PrefillBatch
 from inference.continuous_batch import RowKVCache
 from inference.continuous_batch.paged.block_allocator import SCRATCH
 from inference.continuous_batch.paged.paged_cache import PagedKVCache
@@ -50,7 +51,7 @@ def test_prefill_writes_each_token_at_its_slot(config, device):
     cache.set_blocks(1, [7, 3])                       # scattered, out of order on purpose
     k = tokens(1, 6, config, start=1, device=device)
 
-    cache.update(0, k, k, req_pool_idx=1)
+    cache.write(0, k, k, PrefillBatch.build([1], [6], device))
 
     for p in range(6):
         physical, offset = [7, 3][p // BS], p % BS
@@ -63,7 +64,7 @@ def test_decode_writes_each_row_at_its_own_pos(config, device):
     cache.set_blocks(2, [9])
     cache.pos_gpu = torch.tensor([5, 0, 2], device=device)     # row 0 in its 2nd block
 
-    cache.update(0, tokens(3, 1, config, 1, device), tokens(3, 1, config, 1, device))
+    cache.write(0, tokens(3, 1, config, 1, device), tokens(3, 1, config, 1, device))
 
     assert torch.all(pool_at(cache, 0, 5, 1) == 1)         # row 0, pos 5 → block 5, offset 1
     assert torch.all(pool_at(cache, 0, 9, 2) == 201)       # row 2, pos 2 → block 9, offset 2
@@ -89,7 +90,7 @@ def test_idle_rows_write_only_to_scratch(config, device):
     cache.set_blocks(1, [6])
     cache.pos_gpu = torch.tensor([0, 1, 0], device=device)      # rows 0 and 2 idle
 
-    cache.update(0, tokens(3, 1, config, 1, device), tokens(3, 1, config, 1, device))
+    cache.write(0, tokens(3, 1, config, 1, device), tokens(3, 1, config, 1, device))
 
     written = (cache.key[0] != 0).any(dim=(1, 2, 3)).nonzero().flatten().tolist()
     assert set(written) == {SCRATCH, 6}, f'idle rows wrote into real blocks: {written}'
@@ -99,9 +100,10 @@ def test_all_layers_write_at_the_same_slots(config, device):
     cache = make_cache(config, device)
     cache.set_blocks(0, [4])
     k = tokens(1, 3, config, 1, device)
+    batch = PrefillBatch.build([0], [3], device)
     for layer in range(config.n_layer):
-        cache.update(layer, k, k, req_pool_idx=0)
-    cache.advance(3, req_pool_idx=0)
+        cache.write(layer, k, k, batch)
+    cache.advance(3, prefill=batch)
 
     assert int(cache.pos_gpu[0]) == 3, 'pos moved per layer instead of per forward'
     for layer in range(config.n_layer):
@@ -118,25 +120,22 @@ def test_gather_matches_row_cache(config, device):
     paged.set_blocks(0, [8, 2, 5])                        # scattered on purpose
     paged.set_blocks(2, [1, 9])
 
-    def step(cache, layer, k, req_pool_idx=None):
-        return cache.update(layer, k, k, req_pool_idx=req_pool_idx)
-
-    # prefill rows 0 and 2 with different lengths
-    for row, T, start in [(0, 6, 1), (2, 3, 500)]:
-        k = tokens(1, T, config, start, device)
+    # prefill rows 0 and 2 with different lengths, packed into one batch
+    k = torch.cat([tokens(1, 6, config, 1, device), tokens(1, 3, config, 500, device)], dim=2)
+    batch = PrefillBatch.build([0, 2], [6, 3], device)
+    for cache in (row_cache, paged):
         for layer in range(config.n_layer):
-            step(row_cache, layer, k, row)
-            step(paged, layer, k, row)
-        row_cache.advance(T, req_pool_idx=row)
-        paged.advance(T, req_pool_idx=row)
+            cache.write(layer, k, k, batch)
+        cache.advance(9, prefill=batch)
 
     # three decode steps for the active rows
     active = torch.tensor([True, False, True], device=device)
     for i in range(3):
         k = tokens(3, 1, config, 1000 + 10 * i, device)
         for layer in range(config.n_layer):
-            got_row = step(row_cache, layer, k)
-            got_paged = step(paged, layer, k)
+            row_cache.write(layer, k, k)
+            paged.write(layer, k, k)
+            got_row, got_paged = row_cache.read(layer, 3), paged.read(layer, 3)
         row_cache.advance(1, active=active)
         paged.advance(1, active=active)
 
@@ -147,11 +146,20 @@ def test_gather_matches_row_cache(config, device):
         assert torch.equal(got_paged[1][row, :, :n], got_row[1][row, :, :n]), f'row {row} V differs'
 
 
-def test_prefill_gather_returns_only_that_row(config, device):
+def test_packed_prefill_writes_each_prompt_into_its_own_blocks(config, device):
+    """Two prompts packed end to end: each token lands in its own request's blocks, at
+    its position within its own prompt (both start from 0)."""
     cache = make_cache(config, device)
-    cache.set_blocks(2, [3])
-    k, _ = cache.update(0, tokens(1, 2, config, 1, device), tokens(1, 2, config, 1, device), req_pool_idx=2)
-    assert k.shape[0] == 1
+    cache.set_blocks(0, [7, 3])
+    cache.set_blocks(2, [5])
+    k = torch.cat([tokens(1, 5, config, 1, device), tokens(1, 2, config, 500, device)], dim=2)
+
+    cache.write(0, k, k, PrefillBatch.build([0, 2], [5, 2], device))
+
+    for p in range(5):                                    # request in row 0
+        assert torch.all(pool_at(cache, 0, [7, 3][p // BS], p % BS) == 1 + p)
+    for p in range(2):                                    # request in row 2, from position 0
+        assert torch.all(pool_at(cache, 0, 5, p) == 500 + p)
 
 
 def test_release_points_the_row_back_at_scratch(config, device):
@@ -174,3 +182,24 @@ def test_pools_start_finite(config):
     """Masked columns still flow through attention as 0 * value: NaN would poison them."""
     cache = make_cache(config, 'cpu')
     assert all(torch.isfinite(t).all() for t in cache.key + cache.value)
+
+
+# -- the Triton kernel serves prefill too (CUDA) ----------------------------------------
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='Triton needs CUDA')
+@pytest.mark.parametrize('lens', [[5], [1, 4, 9], [16, 3, 17]])
+def test_kernel_prefill_matches_per_prompt_sdpa(config, lens):
+    """Every prompt token as a kernel row (seq_len = position + 1) must equal causal SDPA
+    run on each prompt separately -- including block boundaries and 1-token prompts."""
+    torch.manual_seed(0)
+    T, H, D = sum(lens), config.n_head, config.n_embd // config.n_head
+    q, k, v = (torch.randn(1, H, T, D, device='cuda') for _ in range(3))
+    cache = PagedKVCache(config, num_blocks=32, block_size=BS, max_seqs=len(lens),
+                         max_blocks_per_seq=W // BS * 2, device='cuda')
+    assert cache.use_kernel
+    blocks = iter(range(1, 32))
+    for row, n in enumerate(lens):
+        cache.set_blocks(row, [next(blocks) for _ in range(-(-n // BS))])
+    batch = PrefillBatch.build(list(range(len(lens))), lens, 'cuda')
+    got = cache.prefill_attend(0, q, k, v, batch)
+    torch.testing.assert_close(got, PagedKVCache.sdpa_prefill(q, k, v, batch), atol=1e-4, rtol=1e-4)

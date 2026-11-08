@@ -2944,7 +2944,7 @@ x                      (B, T, C)
   │ c_attn + split, view + transpose
 q, k, v                (B, n_head, T, head_size)
   │
-  ├── k, v = kv_cache.update(layer_idx, k, v, req_pool_idx=req_pool_idx)   ← model/gpt2/gpt.py
+  ├── prefill: kv_cache.write(layer_idx, k, v, prefill) · decode: kv_cache.attend(...)   ← model/gpt2/gpt.py
   │        the returned k, v REPLACE the local ones
   │
   └── F.scaled_dot_product_attention(q, k, v, attn_mask=...)

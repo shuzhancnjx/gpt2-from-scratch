@@ -18,7 +18,7 @@ def test_every_cache_meets_the_contract():
               PagedKVCache(CFG, num_blocks=9, block_size=4, max_seqs=2, max_blocks_per_seq=4, device='cpu')]
     for cache in caches:
         assert isinstance(cache, BaseKVCache), type(cache).__name__
-    assert [c.fused_decode for c in caches] == [False, False, False]
+    assert not caches[2].use_kernel              # Triton only on CUDA: SDPA on this CPU cache
 
 
 def test_base_kv_cache_is_abstract():

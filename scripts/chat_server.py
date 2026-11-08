@@ -3,7 +3,7 @@
 
     python scripts/chat_server.py                     # then open http://127.0.0.1:8765
     python scripts/chat_server.py --device cpu --max-new 48 --temperature 0
-    python scripts/chat_server.py --cuda-graph --decode-kernel        # CUDA fast paths
+    python scripts/chat_server.py --cuda-graph        # CUDA: replay decode as a graph
 
     curl -s localhost:8765/v1/completions -H 'Content-Type: application/json' \\
          -d '{"prompt": "The capital of France is", "max_tokens": 16, "temperature": 0}'
@@ -44,7 +44,6 @@ def main():
     p.add_argument('--temperature', type=float, default=0.8)
     p.add_argument('--top-k', type=int, default=40)
     p.add_argument('--cuda-graph', action='store_true', help='CUDA: replay the decode step as a graph')
-    p.add_argument('--decode-kernel', action='store_true', help='CUDA: Triton paged decode attention')
     p.add_argument('--history-turns', type=int, default=0,
                    help='earlier exchanges to include in the prompt (0 = single-turn; '
                         'a base model copies its own past replies)')
@@ -63,8 +62,7 @@ def main():
 
     log.info('loading %s …', args.checkpoint)
     llm = LLM(args.checkpoint, engine='paged', device=args.device, max_seqs=args.max_seqs,
-              block_size=args.block_size, cuda_graph=args.cuda_graph,
-              decode_kernel=args.decode_kernel)
+              block_size=args.block_size, cuda_graph=args.cuda_graph)
     params = SamplingParams(max_new_tokens=args.max_new, temperature=args.temperature,
                             top_k=args.top_k)
     llm.generate(['Hello'], SamplingParams(max_new_tokens=2, temperature=params.temperature,

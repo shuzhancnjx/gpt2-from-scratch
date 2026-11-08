@@ -190,16 +190,15 @@ GPU except for the sampled tokens.
 ### The decode step's two fast paths (CUDA)
 
 ```python
-sched = PagedScheduler(model, enc, cfg, max_seqs=32, device='cuda', dtype=torch.float16,
-                       decode_kernel=True)   # Triton paged attention: no gather, no mask
+sched = PagedScheduler(model, enc, cfg, max_seqs=32, device='cuda', dtype=torch.float16)
 sched.capture_graph()                        # record the decode step; replay it each step
 sched.run(prompts, max_new_tokens=128)
 ```
 
-| decode attention | how |
+| paged attention | how |
 |---|---|
-| default | gather each row's blocks into a full-width copy, then masked SDPA |
-| `decode_kernel=True` | `paged_attention.py` walks the block table up to the real length with an online softmax, reading K/V straight from the pool |
+| CUDA (always) | `paged_attention.py`, the Triton kernel: walks the block table up to each row's real length with an online softmax, reading K/V straight from the pool. Decode: one row per request. Prefill: one row per prompt token, all prompts in one launch |
+| CPU / Apple GPU | the same attention as SDPA: per-prompt causal for prefill, gather + mask for decode (Triton runs only on NVIDIA GPUs) |
 
 `capture_graph()` replays the whole decode step (forward, mask, sampler) with one
 launch. Prefill, admission and retirement stay outside the graph; they write the same
@@ -212,7 +211,7 @@ fixed buffers the graph reads. Measured on an A100 (32 requests, gather path):
 ```bash
 python scripts/sample.py --check "The capital of France is"   # static engine, cached vs uncached
 python scripts/chat_server.py                                 # chat UI + OpenAI API (FastAPI), paged engine
-python scripts/bench_paging.py --graph --kernel               # row vs paged vs graph vs kernel (CUDA)
+python scripts/bench_paging.py --graph                        # row vs paged vs paged + graph (CUDA)
 ```
 
 The chat server (`pip install -e ".[serve]"`) also speaks the OpenAI API, so standard

@@ -21,6 +21,7 @@ from collections import deque
 import torch
 
 from inference.base_engine import BaseEngine
+from inference.base_kv_cache import PrefillBatch
 from inference.sampling import SamplingParams, greedy
 
 
@@ -99,6 +100,23 @@ class BaseScheduler(BaseEngine):
         return sampler or greedy
 
     # -- shared helpers --------------------------------------------------------
+
+    def _prefill(self, rows, prompts, sampler):
+        """Prefill several fresh requests in ONE forward: their prompts packed end to
+        end, no padding. rows: each request's slot. prompts: their token-id lists.
+
+        Writes each request's k/v into its slot, samples every first token, and returns
+        them as a list -- one device -> host copy for the whole batch.
+        """
+        batch = PrefillBatch.build(rows, [len(p) for p in prompts], self.device)
+        idx = torch.tensor([t for p in prompts for t in p], dtype=torch.long,
+                           device=self.device).unsqueeze(0)               # (1, sum(lens))
+        logits, _ = self.model(idx, kv_cache=self.cache, pos_ids=batch.positions.unsqueeze(0),
+                               prefill=batch)                            # (1, N, vocab): last tokens
+        first = sampler(logits[0, :, :self.enc.n_vocab])                 # (N, 1)
+        self.next_token_gpu[batch.slots_gpu] = first
+        self.active_gpu[batch.slots_gpu] = True
+        return first.view(-1).tolist()                                    # the one sync
 
     def _mask(self):
         """Which cache columns each row may attend to, derived from pos.

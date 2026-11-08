@@ -8,15 +8,15 @@ LLM loads the model once (model.gpt2.loading), builds the chosen engine, and for
 generate() to it. Every engine implements BaseEngine, so the call is the same for all:
 
     engine='static'  GptInference     one batch, start to finish
-    engine='row'     Scheduler        continuous batching, a full-width KV row per request
-    engine='paged'   PagedScheduler   continuous batching over KV blocks (the default)
+    engine='row'     RowEngine        continuous batching, a full-width KV row per request
+    engine='paged'   PagedEngine   continuous batching over KV blocks (the default)
 
 Engine options are passed through: max_seqs / block_size / num_blocks /
 cuda_graph for 'paged', batch_size for 'row'. max_tokens (the KV width per request)
 defaults to the model's context length.
 """
 
-from inference.continuous_batch import PagedScheduler, Scheduler
+from inference.continuous_batch import PagedEngine, RowEngine
 from inference.sampling import SamplingParams
 from inference.static_batch.inference import GptInference
 from model.gpt2.loading import load_model
@@ -43,8 +43,8 @@ class LLM:
             return GptInference(*args, device=self.device)
         dtype = next(self.model.parameters()).dtype
         if engine == 'row':
-            return Scheduler(*args, device=self.device, dtype=dtype, **options)
-        return PagedScheduler(*args, device=self.device, dtype=dtype, **options)
+            return RowEngine(*args, device=self.device, dtype=dtype, **options)
+        return PagedEngine(*args, device=self.device, dtype=dtype, **options)
 
     def generate(self, prompts, sampling_params=None, **settings):
         """prompts: a string or a list of strings. Settings go in `sampling_params` or as keywords

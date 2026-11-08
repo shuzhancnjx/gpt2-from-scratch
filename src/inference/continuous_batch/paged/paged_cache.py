@@ -35,7 +35,7 @@ import torch
 
 from model.gpt2.gpt import GPTConfig
 from inference.base_kv_cache import BaseKVCache
-from inference.continuous_batch.paged.block_allocator import SCRATCH
+from inference.continuous_batch.paged.block.block_allocator import SCRATCH
 
 
 class PagedKVCache(BaseKVCache):

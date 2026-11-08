@@ -35,15 +35,21 @@ src/                       one top-level package per layer (no umbrella package)
       decode_step.py         the decode step captured in a CUDA graph
       inference.py           GptInference
     continuous_batch/      requests join and leave every step
-      base_scheduler.py      BaseScheduler: the admit -> decode -> retire loop
+      continuous_engine.py   ContinuousEngine: run() / generate() over each engine's _run() loop
+      model_runner.py        ModelRunner: execution (GPU) -- model calls, decode buffers, CUDA
+                             graphs; cache-agnostic, shared by both engines
       row/                   one full-width KV row per request
         row_cache.py           RowKVCache
-        scheduler.py           Scheduler (the simple baseline)
+        engine.py              RowEngine (the simple baseline)
       paged/                 fixed-size KV blocks from a shared pool
-        block_allocator.py     BlockAllocator: free list, scratch block
-        paged_cache.py         PagedKVCache: block table, gather, fused decode
-        paged_scheduler.py     PagedScheduler: host-mirror decisions, CUDA-graph decode
-        paged_attention.py     Triton decode attention over the block table (CUDA)
+        engine.py              PagedEngine: the orchestrator -- one step = schedule, run, update
+        paged_scheduler.py     PagedScheduler: policy (CPU) -- admit, promote, retire -> SchedulerOutput
+        block/                 memory (CPU)
+          block_manager.py       BlockManager: blocks + block-table rows per request
+          block_allocator.py     BlockAllocator: the free list of blocks, scratch block
+        paged_cache.py         PagedKVCache: K/V pools, block table, positions
+        paged_attention.py     Triton paged attention over the block table (CUDA)
+        graph/                 PrefillGraphs, DecodeGraphs (CUDA graphs)
   app/
     llm.py                 LLM: the front door -- load once, pick an engine, generate()
     chat_server.py         FastAPI: chat page + OpenAI-compatible /v1 API, one engine thread
@@ -163,36 +169,45 @@ it a KV cache (a `BaseKVCache`), and pick tokens with `inference/sampling.py`.
 | engine | batch | KV memory per request | used by |
 |---|---|---|---|
 | `static_batch.GptInference` | fixed: every row starts and ends together | a full-width row | `scripts/sample.py` |
-| `continuous_batch.Scheduler` | rows refill as requests finish | a full-width row (`RowKVCache`) | baseline in `bench_paging.py` |
-| `continuous_batch.PagedScheduler` | rows refill as requests finish | only the blocks it needs (`PagedKVCache`) | `chat_server.py`, `bench_paging.py` |
+| `continuous_batch.RowEngine` | rows refill as requests finish | a full-width row (`RowKVCache`) | baseline in `bench_paging.py` |
+| `continuous_batch.PagedEngine` | rows refill as requests finish | only the blocks it needs (`PagedKVCache`) | `chat_server.py`, `bench_paging.py` |
 
 ### One request through the paged engine
 
+`PagedEngine` wires three components, each owning one kind of state:
+
+| component | owns | does |
+|---|---|---|
+| `PagedScheduler` (policy, CPU) | waiting queue, prefilled buffer, decode rows | decides who is admitted, promoted, retired -> `SchedulerOutput` |
+| `BlockManager` (memory, CPU) | which blocks and block-table rows each request holds | reserve, move to a decode row, release |
+| `ModelRunner` (execution, GPU) | model, `PagedKVCache`, CUDA graphs, `next_token_gpu` | prefill, decode, sampling -- the same class `RowEngine` runs on |
+
 ```
-PagedScheduler.run(prompts)                       BaseScheduler: the loop
-  while requests are queued or running:
-    admit()     CPU  find a free row, allocate ceil((prompt + max_new) / 16) blocks,
-                     write the row's block table
-                GPU  prefill: one forward over the whole prompt, writing its K/V into
-                     those blocks; sample the first token
-    decode()    GPU  one forward for every row, one new token each:
-                       per layer: QKV projection -> write the new K/V into the pool
-                       -> attention over the row's real blocks -> MLP
-                     then sample, and copy the B new tokens to the CPU (the one sync)
-    retire()    CPU  end-of-text or max length -> return the text, free the blocks
+PagedEngine.step()
+  out = scheduler.schedule()        CPU  promote prefilled requests into free rows; choose this
+                                         step's prefills (FCFS, block room, token budget) and
+                                         reserve their blocks and prefilled rows
+  runner.prefill(rows, prompts)     GPU  ONE packed forward over the new prompts (graph or eager);
+                                         their K/V into their blocks; sample each first token
+  scheduler.prefilled_with(...)     CPU  -> the prefilled buffer; promote again into free rows
+  runner.apply(started=promoted)    GPU  promoted rows: first token in, row active
+  runner.decode()                   GPU  one forward for every row, one new token each
+  scheduler.update(tokens)          CPU  tokens to requests; end-of-text / max length -> retire,
+                                         blocks back to the pool
+  runner.apply(stopped=retired)     GPU  retired rows idle
 ```
 
-Decisions read **CPU mirrors** (`active_cpu`, `row_len_cpu`, `row_blocks_cpu`); the
-model reads the **GPU copies** (`active_gpu`, `pos_gpu`, `block_table_gpu`). Admit and
-retire write both; decode advances both by the same rule, so the CPU never reads the
-GPU except for the sampled tokens.
+The scheduler decides from **CPU state only**; the runner owns the **GPU state**
+(`next_token_gpu`, `active_gpu`, `pos_gpu`, `block_table_gpu`). The engine is the only
+place that copies from the GPU to the CPU: the first tokens after a prefill and the new
+tokens after a decode. Because the policy needs no model, it is tested without one.
 
 ### The decode step's two fast paths (CUDA)
 
 ```python
-sched = PagedScheduler(model, enc, cfg, max_seqs=32, device='cuda', dtype=torch.float16,
-                       cuda_graph=True)     # decode step replayed as a CUDA graph
-sched.run(prompts, max_new_tokens=128)
+engine = PagedEngine(model, enc, cfg, max_seqs=32, device='cuda', dtype=torch.float16,
+                     cuda_graph=True)       # prefill and decode replayed as CUDA graphs
+engine.run(prompts, max_new_tokens=128)
 ```
 
 | paged attention | how |

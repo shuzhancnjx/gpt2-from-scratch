@@ -12,7 +12,7 @@ import torch
 from model.gpt2.gpt import GPTConfig
 from inference.base_kv_cache import PrefillBatch
 from inference.continuous_batch import RowKVCache
-from inference.continuous_batch.paged.block_allocator import SCRATCH
+from inference.continuous_batch.paged.block.block_allocator import SCRATCH
 from inference.continuous_batch.paged.paged_cache import PagedKVCache
 
 TINY = dict(vocab_size=64, n_layer=2, n_head=2, n_embd=32, block_size=32,

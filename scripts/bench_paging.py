@@ -26,7 +26,7 @@ import torch
 
 from utils.device import default_dtype, pick_device, synchronize
 from model.gpt2.gpt import GPT, GPTConfig
-from inference.continuous_batch import PagedScheduler, Scheduler
+from inference.continuous_batch import PagedEngine, RowEngine
 
 MODELS = {
     '124m': dict(vocab_size=50304, n_layer=12, n_head=12, n_embd=768, block_size=1024),
@@ -56,7 +56,7 @@ def timed_run(sched, prompts, max_new, device):
     synchronize(device)
     seconds = time.perf_counter() - t0
     peak = torch.cuda.max_memory_allocated() if device.startswith('cuda') else None
-    generated = sum(len(g) for g in sched.generated_cpu.values())
+    generated = sum(len(g) for g in sched.generated.values())
     return seconds, generated, peak
 
 
@@ -92,9 +92,9 @@ def main():
     num_blocks = 1 + args.row_slots * W // args.block_size                           # same memory
 
     engines = {
-        'row':   Scheduler(model, enc, cfg, batch_size=args.row_slots, max_tokens=W,
+        'row':   RowEngine(model, enc, cfg, batch_size=args.row_slots, max_tokens=W,
                            device=device, dtype=dtype),
-        'paged': PagedScheduler(model, enc, cfg, max_seqs=args.paged_seqs,
+        'paged': PagedEngine(model, enc, cfg, max_seqs=args.paged_seqs,
                                 block_size=args.block_size, num_blocks=num_blocks,
                                 max_tokens=W, device=device, dtype=dtype),
     }
@@ -103,7 +103,7 @@ def main():
     if args.graph:
         if not device.startswith('cuda'):
             raise SystemExit('--graph needs a CUDA device')
-        engines['paged+graph'] = PagedScheduler(model, enc, cfg, max_seqs=args.paged_seqs,
+        engines['paged+graph'] = PagedEngine(model, enc, cfg, max_seqs=args.paged_seqs,
                                                 block_size=args.block_size, num_blocks=num_blocks,
                                                 max_tokens=W, device=device, dtype=dtype,
                                                 cuda_graph=True)
@@ -118,9 +118,9 @@ def main():
         sched.run(prompts[:2], max_new_tokens=2)                      # warm-up
         seconds, generated, peak = timed_run(sched, prompts, args.max_new, device)
         paged = name.startswith('paged')
-        resident = sched.peak_active if paged else args.row_slots
+        resident = sched.stats.peak_active if paged else args.row_slots
         results[name] = dict(seconds=seconds, generated_tokens=generated,
-                             decode_steps=sched.decode_steps if paged else None,
+                             decode_steps=sched.stats.decode_steps if paged else None,
                              tokens_per_s=generated / seconds, max_resident=resident,
                              kv_reserved_mb=reserved[name] / 2**20,
                              peak_allocated_mb=None if peak is None else peak / 2**20)

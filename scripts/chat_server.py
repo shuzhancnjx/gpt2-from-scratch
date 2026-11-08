@@ -69,7 +69,7 @@ def main():
                                            top_k=sampling_params.top_k))            # warm-up (+ graph)
 
     info = dict(checkpoint=Path(args.checkpoint).name, block_size=args.block_size,
-                num_blocks=llm.engine.allocator.num_blocks)
+                num_blocks=llm.engine.blocks.allocator.num_blocks)
     app = create_app(llm, sampling_params, history_turns=args.history_turns, info=info)
     log.info('ready: http://%s:%d  (API docs at /docs, log level %s%s)', args.host, args.port,
              args.log_level, f', also -> {args.log_file}' if args.log_file else '')

@@ -2,7 +2,7 @@
 
 import pytest
 
-from inference.continuous_batch.paged.block_allocator import SCRATCH, BlockAllocator
+from inference.continuous_batch.paged.block.block_allocator import SCRATCH, BlockAllocator
 
 
 def test_capacity_excludes_scratch():

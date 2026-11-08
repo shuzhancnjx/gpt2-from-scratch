@@ -10,7 +10,7 @@ import torch
 
 from app import LLM, SamplingParams
 from inference.base_engine import BaseEngine
-from inference.continuous_batch import PagedScheduler, Scheduler
+from inference.continuous_batch import PagedEngine, RowEngine
 from inference.static_batch.inference import GptInference
 from model.gpt2 import GPT, GPTConfig
 from model.gpt2.loading import load_model
@@ -29,7 +29,7 @@ def checkpoint(tmp_path):
 
 
 def test_every_engine_is_a_base_engine():
-    for cls in (GptInference, Scheduler, PagedScheduler):
+    for cls in (GptInference, RowEngine, PagedEngine):
         assert issubclass(cls, BaseEngine), cls.__name__
     with pytest.raises(TypeError):
         BaseEngine()
@@ -38,8 +38,8 @@ def test_every_engine_is_a_base_engine():
 def test_all_engines_agree_through_generate(checkpoint):
     model, enc, cfg = load_model(checkpoint, 'cpu')
     engines = [GptInference(model, enc, cfg, device='cpu'),
-               Scheduler(model, enc, cfg, batch_size=2, max_tokens=64),
-               PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=64)]
+               RowEngine(model, enc, cfg, batch_size=2, max_tokens=64),
+               PagedEngine(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=64)]
     outs = [e.generate(PROMPTS, GREEDY) for e in engines]
     assert outs[0] == outs[1] == outs[2]
     assert all(isinstance(o, str) for o in outs[0])
@@ -48,7 +48,7 @@ def test_all_engines_agree_through_generate(checkpoint):
 def test_generate_returns_the_completion_only(checkpoint):
     """run() keeps returning prompt + completion; generate() returns just the new text."""
     model, enc, cfg = load_model(checkpoint, 'cpu')
-    sched = Scheduler(model, enc, cfg, batch_size=2, max_tokens=64)
+    sched = RowEngine(model, enc, cfg, batch_size=2, max_tokens=64)
     full = sched.run(PROMPTS, max_new_tokens=6)
     completions = sched.generate(PROMPTS, GREEDY)
     for p, f, c in zip(PROMPTS, full, completions):

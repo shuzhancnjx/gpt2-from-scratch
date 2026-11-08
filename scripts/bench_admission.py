@@ -117,8 +117,8 @@ def main():
     results = {}
     for budget in args.budgets:
         kwargs = dict(max_seqs=args.max_seqs, block_size=16, device=device, dtype=dtype)
-        if budget and 'max_prefill_tokens' in accepts:
-            kwargs['max_prefill_tokens'] = budget
+        if 'max_prefill_tokens' in accepts:
+            kwargs['max_prefill_tokens'] = budget or None     # 0 = explicitly no cap
         elif budget:
             print(f'  budget {budget}: this scheduler has no max_prefill_tokens -- skipped')
             continue

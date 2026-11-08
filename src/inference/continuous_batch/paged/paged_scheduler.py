@@ -70,7 +70,7 @@ class PagedScheduler(BaseScheduler):
 
     def __init__(self, model, enc, config, max_seqs=4, block_size=16, num_blocks=None,
                  max_tokens=None, watermark=0, device='cpu', dtype=torch.float32,
-                 cuda_graph=False, prefilled_rows=None, max_prefill_tokens=None):
+                 cuda_graph=False, prefilled_rows=None, max_prefill_tokens='auto'):
         """
         model, enc, config  the loaded GPT, its tokenizer, its GPTConfig
         max_seqs            decode rows: the most requests decoding at once (the batch size
@@ -90,9 +90,12 @@ class PagedScheduler(BaseScheduler):
                             prefilled and waiting for a decode row at once. Each holds its
                             blocks while it waits. Default: max_seqs (a full next batch).
                             At least 1: every request passes through this buffer
-        max_prefill_tokens  prompt tokens one step may prefill. Bounds the stall a burst of
-                            new requests causes the running ones; the first prompt of a step
-                            always goes, however long. None = no cap
+        max_prefill_tokens  prompt tokens one step may prefill: bounds the stall a burst of new
+                            requests causes the running ones (the first prompt of a step always
+                            goes, however long). 'auto' (default): 512 when CUDA graphs are on --
+                            graphed prefill costs scale with tokens, so a cap is cheap (measured:
+                            worst step 18 -> 6 ms for -4% tok/s) -- and no cap otherwise, where
+                            each eager prefill pays ~10 ms of fixed cost. None = no cap.
         """
         super().__init__(model, enc, config, max_seqs, max_tokens, device)
         
@@ -109,7 +112,6 @@ class PagedScheduler(BaseScheduler):
         if self.prefilled_rows < 1:
             raise ValueError('prefilled_rows must be >= 1: every request is prefilled into '
                              'the prefilled buffer before it takes a decode row')
-        self.max_prefill_tokens = max_prefill_tokens      # None: no cap per step
         self.cache = PagedKVCache(config, num_blocks, block_size, max_seqs,
                                   self.W // block_size, device, dtype,
                                   prefilled_rows=self.prefilled_rows)
@@ -133,6 +135,9 @@ class PagedScheduler(BaseScheduler):
         if cuda_graph and str(device).startswith('cuda'):
             self.decode_graphs = DecodeGraphs(self)
             self.prefill_graphs = PrefillGraphs(self)
+        if max_prefill_tokens == 'auto':
+            max_prefill_tokens = 512 if self.prefill_graphs is not None else None
+        self.max_prefill_tokens = max_prefill_tokens      # None: no cap per step
 
     # -- decisions from host mirrors ------------------------------------------
 

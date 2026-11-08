@@ -387,3 +387,21 @@ def test_graph_objects_are_not_tested_for_truth(parts):
     from inference.continuous_batch.paged import paged_scheduler
     src = inspect.getsource(paged_scheduler)
     assert 'if self.decode_graphs:' not in src and 'if self.prefill_graphs:' not in src
+
+
+def test_prefill_budget_auto_is_uncapped_without_graphs(parts):
+    """'auto': no cap when prefill runs eagerly (each forward pays a fixed cost)."""
+    model, enc, cfg = parts
+    assert PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W).max_prefill_tokens is None
+    assert PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W,
+                          max_prefill_tokens=300).max_prefill_tokens == 300
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA graphs need CUDA')
+def test_prefill_budget_auto_caps_with_graphs(parts):
+    model, enc, cfg = parts
+    s = PagedScheduler(model.to('cuda'), enc, cfg, max_seqs=2, block_size=4, max_tokens=W,
+                       device='cuda', cuda_graph=True)
+    assert s.max_prefill_tokens == 512
+    assert PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W, device='cuda',
+                          cuda_graph=True, max_prefill_tokens=None).max_prefill_tokens is None

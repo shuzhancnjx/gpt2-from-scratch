@@ -21,7 +21,9 @@ from inference.base_kv_cache import PrefillBatch
 from inference.continuous_batch.base_scheduler import BaseScheduler
 from inference.cuda_graph import BaseGraphs
 
-BUCKETS = (256, 512, 1024, 2048, 4096)
+# Small buckets: prefill graphs pay off on small, launch-bound prefills (the token budget
+# keeps them <= 512 tokens); a bigger batch is GPU-bound -- it runs eagerly, padding-free.
+BUCKETS = (64, 128, 256, 512, 1024)
 
 
 class PrefillGraphs(BaseGraphs):

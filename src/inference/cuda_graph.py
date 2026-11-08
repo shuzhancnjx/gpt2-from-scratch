@@ -53,7 +53,7 @@ class CapturedGraph:
         #  3. keep the torch.cuda.CUDAGraph as self.graph
         #  both runs under torch.inference_mode()
         
-        side = torch.cuad.Stream() 
+        side = torch.cuda.Stream() 
         side.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(side), torch.inference_mode(): 
             for _ in range(warmup): 

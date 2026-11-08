@@ -39,27 +39,27 @@ class RowKVCache(BaseKVCache):
 
     # -- writes ------------------------------------------------------------
 
-    def update(self, layer_idx, key, value, row=None):
+    def update(self, layer_idx, key, value, req_pool_idx=None):
         """Write this layer's k/v and return the full buffers to attend over.
 
-        row=None  -- decode: every row writes one token at its own pos.
-        row=int   -- prefill: one row writes a contiguous block from slot 0.
+        req_pool_idx=None  -- decode: every row writes one token at its own pos.
+        req_pool_idx=int   -- prefill: one row writes a contiguous block from slot 0.
         """
         assert layer_idx is not None, 'layer_idx is required when a cache is passed'
 
-        if row is not None:
-            return self._prefill(layer_idx, key, value, row)
+        if req_pool_idx is not None:
+            return self._prefill(layer_idx, key, value, req_pool_idx)
         return self._decode(layer_idx, key, value)
 
-    def _prefill(self, layer_idx, key, value, row):
+    def _prefill(self, layer_idx, key, value, req_pool_idx):
         T = key.size(2)
         assert key.size(0) == 1, f'prefill writes one row, got a batch of {key.size(0)}'
-        assert int(self.pos_gpu[row]) == 0, f'row {row} is not free (pos={int(self.pos_gpu[row])})'
+        assert int(self.pos_gpu[req_pool_idx]) == 0, f'row {req_pool_idx} is not free (pos={int(self.pos_gpu[req_pool_idx])})'
         assert T <= self.width, f'prompt of {T} exceeds cache width {self.width}'
 
         # slice(), not fancy indexing: basic slicing gives a VIEW, so attention
         # reads the buffer in place instead of copying (B=1, nh, W, hs) per layer.
-        sl = slice(row, row + 1)
+        sl = slice(req_pool_idx, req_pool_idx + 1)
         # Both sides stay 4-D here: basic slices preserve every axis, unlike the
         # decode path where advanced indexing collapses the sequence dimension.
         self.key[layer_idx][sl, :, :T] = key
@@ -78,28 +78,28 @@ class RowKVCache(BaseKVCache):
 
     # -- bookkeeping -------------------------------------------------------
 
-    def advance(self, T, row=None, active=None):
+    def advance(self, T, req_pool_idx=None, active=None):
         """Move the write pointer. Called once per forward, never per layer.
 
         Advancing inside update() would shear the layers apart: update runs
         n_layer times per forward, so row pointers would jump by n_layer * T.
         """
-        if row is not None:
-            self.pos_gpu[row] = T                      # prefill starts from 0
+        if req_pool_idx is not None:
+            self.pos_gpu[req_pool_idx] = T                      # prefill starts from 0
         elif active is not None:
             self.pos_gpu += active.long() * T          # only rows still generating
         else:
             self.pos_gpu += T
 
-    def seq_len(self, row=None):
-        return int(self.pos_gpu[row]) if row is not None else self.pos_gpu
+    def seq_len(self, req_pool_idx=None):
+        return int(self.pos_gpu[req_pool_idx]) if req_pool_idx is not None else self.pos_gpu
 
-    def release(self, row):
+    def release(self, req_pool_idx):
         """Retire a row so a queued request can take its slot."""
-        self.pos_gpu[row] = 0
+        self.pos_gpu[req_pool_idx] = 0
         for k, v in zip(self.key, self.value):
-            k[row].zero_()
-            v[row].zero_()
+            k[req_pool_idx].zero_()
+            v[req_pool_idx].zero_()
 
     def reset(self):
         self.pos_gpu.zero_()

@@ -50,7 +50,7 @@ def test_prefill_writes_each_token_at_its_slot(config, device):
     cache.set_blocks(1, [7, 3])                       # scattered, out of order on purpose
     k = tokens(1, 6, config, start=1, device=device)
 
-    cache.update(0, k, k, row=1)
+    cache.update(0, k, k, req_pool_idx=1)
 
     for p in range(6):
         physical, offset = [7, 3][p // BS], p % BS
@@ -100,8 +100,8 @@ def test_all_layers_write_at_the_same_slots(config, device):
     cache.set_blocks(0, [4])
     k = tokens(1, 3, config, 1, device)
     for layer in range(config.n_layer):
-        cache.update(layer, k, k, row=0)
-    cache.advance(3, row=0)
+        cache.update(layer, k, k, req_pool_idx=0)
+    cache.advance(3, req_pool_idx=0)
 
     assert int(cache.pos_gpu[0]) == 3, 'pos moved per layer instead of per forward'
     for layer in range(config.n_layer):
@@ -118,8 +118,8 @@ def test_gather_matches_row_cache(config, device):
     paged.set_blocks(0, [8, 2, 5])                        # scattered on purpose
     paged.set_blocks(2, [1, 9])
 
-    def step(cache, layer, k, row=None):
-        return cache.update(layer, k, k, row=row)
+    def step(cache, layer, k, req_pool_idx=None):
+        return cache.update(layer, k, k, req_pool_idx=req_pool_idx)
 
     # prefill rows 0 and 2 with different lengths
     for row, T, start in [(0, 6, 1), (2, 3, 500)]:
@@ -127,8 +127,8 @@ def test_gather_matches_row_cache(config, device):
         for layer in range(config.n_layer):
             step(row_cache, layer, k, row)
             step(paged, layer, k, row)
-        row_cache.advance(T, row=row)
-        paged.advance(T, row=row)
+        row_cache.advance(T, req_pool_idx=row)
+        paged.advance(T, req_pool_idx=row)
 
     # three decode steps for the active rows
     active = torch.tensor([True, False, True], device=device)
@@ -150,7 +150,7 @@ def test_gather_matches_row_cache(config, device):
 def test_prefill_gather_returns_only_that_row(config, device):
     cache = make_cache(config, device)
     cache.set_blocks(2, [3])
-    k, _ = cache.update(0, tokens(1, 2, config, 1, device), tokens(1, 2, config, 1, device), row=2)
+    k, _ = cache.update(0, tokens(1, 2, config, 1, device), tokens(1, 2, config, 1, device), req_pool_idx=2)
     assert k.shape[0] == 1
 
 

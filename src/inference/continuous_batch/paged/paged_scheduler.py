@@ -142,7 +142,7 @@ class PagedScheduler(BaseScheduler):
             pos_ids = torch.arange(L, device=self.device).unsqueeze(0)
             mask = (torch.arange(self.W, device=self.device) < L).unsqueeze(0)
             logits, _ = self.model(idx, kv_cache=self.cache, pos_ids=pos_ids,
-                                   attn_mask=mask, cache_row=row)
+                                   attn_mask=mask, req_pool_idx=row)
 
             tok = sampler(logits[:, -1, :self.enc.n_vocab])
             self.next_token_gpu[row] = tok

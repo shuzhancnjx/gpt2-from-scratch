@@ -35,7 +35,7 @@ class CausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x, kv_cache: 'BaseKVCache | None' = None, layer_idx=None, attn_mask=None,
-                cache_row=None):
+                req_pool_idx=None):
         B, T, C = x.shape
 
         q, k, v = self.c_attn(x).split(self.config.n_embd, dim=2)
@@ -45,12 +45,12 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.config.n_head, self.head_size).transpose(1, 2)
 
         drop_out = self.config.dropout if self.training else 0.0
-        if kv_cache is not None and cache_row is None and kv_cache.fused_decode:
+        if kv_cache is not None and req_pool_idx is None and kv_cache.fused_decode:
             # decode on a paged cache with a fused kernel: the cache writes k/v and
             # attends in one call (no gathered buffers, no mask)
             y = kv_cache.decode_attention(layer_idx, q, k, v)       # B, NH, 1, H
         elif kv_cache is not None:
-            k, v = kv_cache.update(layer_idx, k, v, row=cache_row)
+            k, v = kv_cache.update(layer_idx, k, v, req_pool_idx=req_pool_idx)
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_out)
         elif attn_mask is not None: 
             y = F.scaled_dot_product_attention(
@@ -99,9 +99,9 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x, kv_cache=None, layer_idx=None, attn_mask=None, cache_row=None):
+    def forward(self, x, kv_cache=None, layer_idx=None, attn_mask=None, req_pool_idx=None):
         x = x + self.attn(self.ln_1(x), kv_cache=kv_cache, layer_idx=layer_idx,
-                          attn_mask=attn_mask, cache_row=cache_row)
+                          attn_mask=attn_mask, req_pool_idx=req_pool_idx)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -136,7 +136,7 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None, kv_cache: 'BaseKVCache | None' = None, pos_ids=None, attn_mask=None,
-                cache_row=None, cache_active=None):
+                req_pool_idx=None, cache_active=None):
 
         assert not (kv_cache is not None and attn_mask is None), 'a full-width cache needs a mask to hide unwritten slots'
 
@@ -163,9 +163,9 @@ class GPT(nn.Module):
 
         for i, block in enumerate(self.transformer.h):
             x = block(x, kv_cache=kv_cache, layer_idx=i, attn_mask=sdpa_mask,
-                      cache_row=cache_row)
+                      req_pool_idx=req_pool_idx)
         if kv_cache is not None: 
-            kv_cache.advance(T, row=cache_row, active=cache_active)
+            kv_cache.advance(T, req_pool_idx=req_pool_idx, active=cache_active)
 
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)

@@ -35,8 +35,8 @@ def kv(B, T, config, fill):
 # -- prefill -----------------------------------------------------------------
 
 def test_prefill_writes_one_row_from_slot_zero(cache, config):
-    cache.update(0, kv(1, 5, config, 1.0), kv(1, 5, config, 1.0), row=1)
-    cache.advance(5, row=1)
+    cache.update(0, kv(1, 5, config, 1.0), kv(1, 5, config, 1.0), req_pool_idx=1)
+    cache.advance(5, req_pool_idx=1)
 
     assert cache.pos_gpu.tolist() == [0, 5, 0], 'only row 1 should have advanced'
     assert torch.all(cache.key[0][1, :, :5] == 1.0)
@@ -47,18 +47,18 @@ def test_prefill_writes_one_row_from_slot_zero(cache, config):
 
 def test_prefill_returns_a_view_not_a_copy(cache, config):
     """Attention reads the returned buffer; a copy would cost ~10MB per layer."""
-    k, _ = cache.update(0, kv(1, 4, config, 2.0), kv(1, 4, config, 2.0), row=2)
+    k, _ = cache.update(0, kv(1, 4, config, 2.0), kv(1, 4, config, 2.0), req_pool_idx=2)
 
     assert k.shape == (1, config.n_head, cache.width, config.n_embd // config.n_head)
     assert k._base is cache.key[0], 'returned a copy -- use basic slicing, not fancy indexing'
 
 
 def test_prefill_into_an_occupied_row_is_rejected(cache, config):
-    cache.update(0, kv(1, 5, config, 1.0), kv(1, 5, config, 1.0), row=0)
-    cache.advance(5, row=0)
+    cache.update(0, kv(1, 5, config, 1.0), kv(1, 5, config, 1.0), req_pool_idx=0)
+    cache.advance(5, req_pool_idx=0)
 
     with pytest.raises(AssertionError):
-        cache.update(0, kv(1, 3, config, 1.0), kv(1, 3, config, 1.0), row=0)
+        cache.update(0, kv(1, 3, config, 1.0), kv(1, 3, config, 1.0), req_pool_idx=0)
 
 
 # -- decode ------------------------------------------------------------------
@@ -92,8 +92,8 @@ def test_advance_skips_inactive_rows(cache):
 
 def test_release_frees_one_row_only(cache, config):
     for row in range(3):
-        cache.update(0, kv(1, 4, config, row + 1.0), kv(1, 4, config, row + 1.0), row=row)
-        cache.advance(4, row=row)
+        cache.update(0, kv(1, 4, config, row + 1.0), kv(1, 4, config, row + 1.0), req_pool_idx=row)
+        cache.advance(4, req_pool_idx=row)
 
     cache.release(1)
 
@@ -104,12 +104,12 @@ def test_release_frees_one_row_only(cache, config):
 
 
 def test_released_row_accepts_a_new_request(cache, config):
-    cache.update(0, kv(1, 6, config, 1.0), kv(1, 6, config, 1.0), row=0)
-    cache.advance(6, row=0)
+    cache.update(0, kv(1, 6, config, 1.0), kv(1, 6, config, 1.0), req_pool_idx=0)
+    cache.advance(6, req_pool_idx=0)
     cache.release(0)
 
-    cache.update(0, kv(1, 2, config, 5.0), kv(1, 2, config, 5.0), row=0)
-    cache.advance(2, row=0)
+    cache.update(0, kv(1, 2, config, 5.0), kv(1, 2, config, 5.0), req_pool_idx=0)
+    cache.advance(2, req_pool_idx=0)
 
     assert int(cache.pos_gpu[0]) == 2
     assert torch.all(cache.key[0][0, :, :2] == 5.0)
@@ -121,8 +121,8 @@ def test_released_row_accepts_a_new_request(cache, config):
 def test_all_layers_stay_in_lockstep(cache, config):
     """advance() belongs to the caller, once per forward -- never inside update()."""
     for layer in range(len(cache.key)):
-        cache.update(layer, kv(1, 3, config, 1.0), kv(1, 3, config, 1.0), row=0)
-    cache.advance(3, row=0)
+        cache.update(layer, kv(1, 3, config, 1.0), kv(1, 3, config, 1.0), req_pool_idx=0)
+    cache.advance(3, req_pool_idx=0)
 
     assert int(cache.pos_gpu[0]) == 3, 'pos moved per layer instead of per forward'
     for layer in range(len(cache.key)):
@@ -258,8 +258,8 @@ def test_decode_feeds_per_row_positions_and_leaves_idle_slots_alone(sched_parts)
     real = sched.model
 
     def spy(idx, **kwargs):
-        # cache_row, not idx width: a one-token prompt prefills with T == 1 too
-        if kwargs.get('cache_row') is None:        # decode, not prefill
+        # req_pool_idx, not idx width: a one-token prompt prefills with T == 1 too
+        if kwargs.get('req_pool_idx') is None:        # decode, not prefill
             seen.append((kwargs['pos_ids'].flatten().tolist(),
                          sched.cache.pos_gpu.tolist(),
                          sched.active_gpu.tolist()))

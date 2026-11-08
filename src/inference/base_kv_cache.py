@@ -21,19 +21,19 @@ class BaseKVCache(ABC):
     fused_decode = False                        # True: gpt.py calls decode_attention()
 
     @abstractmethod
-    def update(self, layer_idx, key, value, row=None):
+    def update(self, layer_idx, key, value, req_pool_idx=None):
         """Write this layer's new k/v (B, H, T, D); return the k/v to attend over.
 
-        row=None: every row writes T tokens at its own position (decode).
-        row=int:  that one row writes T tokens (prefill).
+        req_pool_idx=None: every sequence slot writes T tokens at its own position (decode).
+        req_pool_idx=int:  only that request's slot writes T tokens (prefill).
         """
 
     @abstractmethod
-    def advance(self, T, row=None, active=None):
+    def advance(self, T, req_pool_idx=None, active=None):
         """Move the write position by T, once per forward (not per layer)."""
 
     @abstractmethod
-    def seq_len(self, row=None):
+    def seq_len(self, req_pool_idx=None):
         """Tokens already written -- the next position."""
 
     @abstractmethod

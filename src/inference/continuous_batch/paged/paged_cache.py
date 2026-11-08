@@ -70,8 +70,8 @@ class PagedKVCache(BaseKVCache):
 
     # -- block table (host decisions → device) -------------------------------
 
-    def set_blocks(self, row, blocks):
-        """Record which physical blocks `row` owns, in logical order.
+    def set_blocks(self, req_pool_idx, blocks):
+        """Record which physical blocks `req_pool_idx` owns, in logical order.
 
         Unused entries point at scratch. One small host→device copy, made only when
         a row's blocks change (admit, grow, retire) -- never on an ordinary step.
@@ -79,7 +79,7 @@ class PagedKVCache(BaseKVCache):
         if len(blocks) > self.max_blocks_per_seq:
             raise ValueError(f'{len(blocks)} blocks exceed max_blocks_per_seq={self.max_blocks_per_seq}')
         padded = list(blocks) + [SCRATCH] * (self.max_blocks_per_seq - len(blocks))
-        self.block_table_gpu[row] = torch.tensor(padded, dtype=torch.long, device=self.device)
+        self.block_table_gpu[req_pool_idx] = torch.tensor(padded, dtype=torch.long, device=self.device)
 
     def slots(self, rows, positions):
         """Flat pool index for each (row, position) pair -- tensors in, tensor out."""
@@ -88,20 +88,20 @@ class PagedKVCache(BaseKVCache):
 
     # -- writes and reads ------------------------------------------------------
 
-    def update(self, layer_idx, key, value, row=None):
+    def update(self, layer_idx, key, value, req_pool_idx=None):
         """Write this layer's new k/v, then return the gathered buffers to attend over.
 
-        row=None  -- decode: every row writes one token at its own pos.
-        row=int   -- prefill: one row writes T tokens starting at its pos.
+        req_pool_idx=None  -- decode: every row writes one token at its own pos.
+        req_pool_idx=int   -- prefill: one row writes T tokens starting at its pos.
         """
         assert layer_idx is not None, 'layer_idx is required when a cache is passed'
         B, H, T, D = key.shape
 
-        if row is not None:
+        if req_pool_idx is not None:
             assert B == 1, f'prefill writes one row, got a batch of {B}'
-            positions = self.pos_gpu[row] + torch.arange(T, device=self.device)
-            rows = torch.full((T,), row, dtype=torch.long, device=self.device)
-            sel = slice(row, row + 1)
+            positions = self.pos_gpu[req_pool_idx] + torch.arange(T, device=self.device)
+            rows = torch.full((T,), req_pool_idx, dtype=torch.long, device=self.device)
+            sel = slice(req_pool_idx, req_pool_idx + 1)
         else:
             assert T == 1, f'decode writes one token per row, got {T}'
             rows = torch.arange(B, device=self.device)
@@ -154,23 +154,23 @@ class PagedKVCache(BaseKVCache):
 
     # -- bookkeeping (same contract as RowKVCache) ----------------------------
 
-    def advance(self, T, row=None, active=None):
+    def advance(self, T, req_pool_idx=None, active=None):
         """Move the write pointer once per forward, never per layer."""
-        if row is not None:
-            self.pos_gpu[row] = T                      # prefill starts from 0
+        if req_pool_idx is not None:
+            self.pos_gpu[req_pool_idx] = T                      # prefill starts from 0
         elif active is not None:
             self.pos_gpu += active.long() * T          # only rows still generating
         else:
             self.pos_gpu += T
 
-    def seq_len(self, row=None):
-        return int(self.pos_gpu[row]) if row is not None else self.pos_gpu
+    def seq_len(self, req_pool_idx=None):
+        return int(self.pos_gpu[req_pool_idx]) if req_pool_idx is not None else self.pos_gpu
 
-    def release(self, row):
+    def release(self, req_pool_idx):
         """Point the row back at scratch. The pool is NOT cleared: stale blocks are
         harmless because the mask hides everything at or past pos."""
-        self.pos_gpu[row] = 0
-        self.block_table_gpu[row] = SCRATCH
+        self.pos_gpu[req_pool_idx] = 0
+        self.block_table_gpu[req_pool_idx] = SCRATCH
 
     def reset(self):
         self.pos_gpu.zero_()

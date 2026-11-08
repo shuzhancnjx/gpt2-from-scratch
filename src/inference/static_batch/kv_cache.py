@@ -14,10 +14,10 @@ class KVCache(BaseKVCache):
 
         self.pos = torch.zeros(1,  dtype=torch.long, device=device)
 
-    def update(self, layer_idx,  key, value, row=None): 
+    def update(self, layer_idx,  key, value, req_pool_idx=None): 
 
         # This cache has ONE shared pointer; per-row writes need RowKVCache.
-        assert row is None, 'KVCache writes every row at one shared pos; use RowKVCache'
+        assert req_pool_idx is None, 'KVCache writes every row at one shared pos; use RowKVCache'
 
         assert layer_idx is not None, "layer_idx should not be none when kv_cache is passed"
 
@@ -33,8 +33,8 @@ class KVCache(BaseKVCache):
     def seq_len(self): 
         return int(self.pos) 
 
-    def advance(self, T, row=None, active=None): 
-        assert row is None and active is None, \
+    def advance(self, T, req_pool_idx=None, active=None): 
+        assert req_pool_idx is None and active is None, \
             'KVCache advances every row together; use RowKVCache for per-row pointers'
         self.pos += T
 

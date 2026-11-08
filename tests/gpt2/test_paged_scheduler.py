@@ -377,3 +377,12 @@ def test_oversized_prefill_falls_back_to_eager(parts):
     eager = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W, device='cuda')
     assert graphed.run(PROMPTS, max_new_tokens=4) == eager.run(PROMPTS, max_new_tokens=4)
     assert len(graphed.prefill_graphs) == 0
+
+
+def test_graph_objects_are_not_tested_for_truth(parts):
+    """BaseGraphs has __len__, so an empty one is falsy: the scheduler must check `is not
+    None`, or graphs are never captured (they start empty) and everything runs eager."""
+    import inspect
+    from inference.continuous_batch.paged import paged_scheduler
+    src = inspect.getsource(paged_scheduler)
+    assert 'if self.decode_graphs:' not in src and 'if self.prefill_graphs:' not in src

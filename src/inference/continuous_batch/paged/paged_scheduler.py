@@ -142,7 +142,7 @@ class PagedScheduler(BaseScheduler):
 
     def _prepare(self, sampling_params):
         """Before a run (no row active): capture the decode graph for these settings if new."""
-        if self.decode_graphs:
+        if self.decode_graphs is not None:
             self.decode_graphs.prepare(self.decode_graphs.key(sampling_params))
 
     # -- the three operations --------------------------------------------------
@@ -237,14 +237,14 @@ class PagedScheduler(BaseScheduler):
     def _decode(self, sampling_params):
         """One decode step for every row: the graph for these sampler settings (one launch
         replaces hundreds), or the base class's eager step."""
-        if self.decode_graphs:
+        if self.decode_graphs is not None:
             return self.decode_graphs.run(sampling_params)
         return super()._decode(sampling_params)
 
     def _prefill(self, rows, prompts, sampling_params):
         """Packed prefill: one graph replay when a bucket fits, else the base class's eager
         forward. Returns the first tokens on the device (N, 1) -- like _decode."""
-        if self.prefill_graphs:
+        if self.prefill_graphs is not None:
             first = self.prefill_graphs.run(rows, prompts, sampling_params)
             if first is not None:                   # None: too big for any bucket
                 return first

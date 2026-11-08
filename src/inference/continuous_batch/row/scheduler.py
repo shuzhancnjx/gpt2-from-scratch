@@ -61,7 +61,10 @@ class Scheduler(BaseScheduler):
         if not rows:
             return
 
-        first = self._prefill(rows, [prompt_ids[r] for r in reqs], sampler)
+        first_gpu, first = self._prefill(rows, [prompt_ids[r] for r in reqs], sampler)
+        rows_gpu = torch.tensor(rows, device=self.device)
+        self.next_token_gpu[rows_gpu] = first_gpu
+        self.active_gpu[rows_gpu] = True
         for row, req, tok in zip(rows, reqs, first):
             self.slot_req_cpu[row] = req
             self.generated_cpu[req] = [tok]
@@ -69,7 +72,7 @@ class Scheduler(BaseScheduler):
     def _decode(self, sampler):
         """One token for every row, each writing at its own pos."""
         logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
-                               pos_ids=self.cache.pos_gpu.unsqueeze(1),
+                               pos_ids=self.cache.seq_len().unsqueeze(1),
                                attn_mask=self._mask(), cache_active=self.active_gpu)
 
         tok = sampler(logits[:, -1, :self.enc.n_vocab])

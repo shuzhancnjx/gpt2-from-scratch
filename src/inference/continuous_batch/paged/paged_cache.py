@@ -41,7 +41,17 @@ from inference.continuous_batch.paged.block_allocator import SCRATCH
 class PagedKVCache(BaseKVCache):
 
     def __init__(self, config: GPTConfig, num_blocks, block_size, max_seqs,
-                 max_blocks_per_seq, device, dtype=torch.float32):
+                 max_blocks_per_seq, device, dtype=torch.float32, prefilled_rows=0):
+        """
+        num_blocks          blocks in the pool, per layer, incl. the scratch block (0)
+        block_size          tokens per block
+        max_seqs            decode rows: the batch every decode step runs
+        max_blocks_per_seq  block-table width: the most blocks one request may own
+                            (W = max_blocks_per_seq * block_size)
+        prefilled_rows      extra block-table / pos rows for requests that are prefilled
+                            but not decoding yet (the scheduler's prefilled buffer);
+                            promote() moves one into a decode row
+        """
         head_size = config.n_embd // config.n_head
         shape = (num_blocks, block_size, config.n_head, head_size)
 
@@ -50,9 +60,13 @@ class PagedKVCache(BaseKVCache):
         self.key = [torch.zeros(shape, device=device, dtype=dtype) for _ in range(config.n_layer)]
         self.value = [torch.zeros(shape, device=device, dtype=dtype) for _ in range(config.n_layer)]
 
-        self.block_table_gpu = torch.full((max_seqs, max_blocks_per_seq), SCRATCH,
-                                      dtype=torch.long, device=device)
-        self.pos_gpu = torch.zeros(max_seqs, dtype=torch.long, device=device)
+        # Rows [0, max_seqs) are the decode batch. Rows [max_seqs, max_seqs + prefilled_rows)
+        # hold PREFILLED requests waiting for a decode row: their blocks are written, they
+        # just are not decoding yet. promote() moves one into a free decode row.
+        rows = max_seqs + prefilled_rows
+        self.block_table_gpu = torch.full((rows, max_blocks_per_seq), SCRATCH,
+                                          dtype=torch.long, device=device)
+        self.pos_gpu = torch.zeros(rows, dtype=torch.long, device=device)
 
         self.num_blocks = num_blocks
         self.block_size = block_size
@@ -170,12 +184,21 @@ class PagedKVCache(BaseKVCache):
         if prefill is not None:
             self.pos_gpu[prefill.slots_gpu] = prefill.lens_gpu   # each prompt written from 0
         elif active is not None:
-            self.pos_gpu += active.long() * T          # only rows still generating
+            self.pos_gpu[:self.max_seqs] += active.long() * T   # decode rows still generating
         else:
-            self.pos_gpu += T
+            self.pos_gpu[:self.max_seqs] += T
 
     def seq_len(self):
-        return self.pos_gpu
+        """The decode rows' positions -- a view, so a captured graph sees every update."""
+        return self.pos_gpu[:self.max_seqs]
+
+    def promote(self, prefilled_row, decode_row):
+        """Move a prefilled request from its prefilled row into a free decode row: copy its
+        block-table row and position, then free the prefilled row. Small in-place writes --
+        the K/V themselves stay where they are in the pool."""
+        self.block_table_gpu[decode_row] = self.block_table_gpu[prefilled_row]
+        self.pos_gpu[decode_row] = self.pos_gpu[prefilled_row]
+        self.release(prefilled_row)
 
     def release(self, req_pool_idx):
         """Point the row back at scratch. The pool is NOT cleared: stale blocks are

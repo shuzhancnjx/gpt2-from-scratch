@@ -273,3 +273,77 @@ def test_prefill_still_stores_the_prompt_for_decode(parts):
     got = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W).run(
         PROMPTS, max_new_tokens=8)
     assert got == [greedy_reference(model, enc, p, 8) for p in PROMPTS]
+
+
+# -- two-stage admission: prefill decoupled from decode rows --------------------------
+
+def test_prefill_runs_ahead_of_free_rows(parts, monkeypatch):
+    """With every row busy, waiting requests are prefilled into prefilled rows and promoted
+    when a row frees -- same text as the row engine."""
+    model, enc, cfg = parts
+    prompts = PROMPTS * 3
+    sched = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W)
+    seen_prefilled = []
+    original = sched._promote
+
+    def spy():
+        seen_prefilled.append(len(sched.prefilled))
+        original()
+
+    monkeypatch.setattr(sched, '_promote', spy)
+    got = sched.run(prompts, max_new_tokens=6)
+    expected = Scheduler(model, enc, cfg, batch_size=2, max_tokens=W).run(prompts, max_new_tokens=6)
+    assert got == expected
+    assert max(seen_prefilled) > 0, 'nothing was ever prefilled ahead of a free row'
+    assert not sched.prefilled and sorted(sched.free_prefilled_rows) == list(range(2, 4))
+    assert sched.allocator.num_free == sched.allocator.capacity
+
+
+def test_prefill_token_budget_splits_prefill_but_not_the_text(parts, monkeypatch):
+    """max_prefill_tokens caps one step's prefill: more, smaller prefill forwards."""
+    model, enc, cfg = parts
+    counts = {}
+    for budget in (None, 8):
+        sched = PagedScheduler(model, enc, cfg, max_seqs=4, block_size=4, max_tokens=W,
+                               max_prefill_tokens=budget)
+        calls, original = [], sched._prefill
+
+        def spy(rows, prompts, sampler, calls=calls, original=original):
+            calls.append(sum(len(p) for p in prompts))
+            return original(rows, prompts, sampler)
+
+        monkeypatch.setattr(sched, '_prefill', spy)
+        counts[budget] = (sched.run(PROMPTS, max_new_tokens=5), calls)
+    assert counts[8][0] == counts[None][0]
+    assert len(counts[8][1]) > len(counts[None][1])
+    longest = max(len(enc.encode(p)) for p in PROMPTS)
+    assert all(n <= max(8, longest) for n in counts[8][1]), 'a step prefilled past its budget'
+
+
+def test_promote_moves_the_block_table_row_and_pos(parts):
+    from inference.continuous_batch.paged.block_allocator import SCRATCH
+    model, enc, cfg = parts
+    sched = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W)
+    cache = sched.cache
+    cache.set_blocks(3, [5, 9])                         # prefilled row 3
+    cache.pos_gpu[3] = 6
+    cache.promote(3, 0)
+    assert cache.block_table_gpu[0, :2].tolist() == [5, 9] and int(cache.pos_gpu[0]) == 6
+    assert int(cache.pos_gpu[3]) == 0 and torch.all(cache.block_table_gpu[3] == SCRATCH)
+
+
+def test_prefilled_buffer_needs_at_least_one_row(parts):
+    """With no prefilled rows nothing could ever be admitted -- refuse it up front."""
+    model, enc, cfg = parts
+    with pytest.raises(ValueError, match='prefilled_rows'):
+        PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W, prefilled_rows=0)
+
+
+def test_one_prefilled_row_still_serves_everything(parts):
+    """The smallest buffer: one prefilled request at a time, same text as the row engine."""
+    model, enc, cfg = parts
+    prompts = PROMPTS * 2
+    got = PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W,
+                         prefilled_rows=1).run(prompts, max_new_tokens=5)
+    expected = Scheduler(model, enc, cfg, batch_size=2, max_tokens=W).run(prompts, max_new_tokens=5)
+    assert got == expected

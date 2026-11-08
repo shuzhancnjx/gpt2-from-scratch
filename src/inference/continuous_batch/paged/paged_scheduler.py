@@ -8,6 +8,34 @@ and the reset. What differs is memory and how decisions are made:
                    shared pool -- memory proportional to the request -- and returns
                    them on retire.
 
+High-level flow -- one loop iteration (BaseScheduler.run) is one step:
+
+  ┌───────┐   ┌────────────────┐   ┌───────────┐   ┌──────────┐   ┌─────────┐   ┌─────────┐
+  │ queue │──►│ _admit_prefill │──►│ prefilled │──►│ _promote │──►│ _decode │──►│ _retire │
+  └───────┘   └────────┬───────┘   └───────────┘   └──────────┘   └─────────┘   └────┬────┘
+                       ▲                                                             │
+                       └──────────────────── rows + blocks freed ────────────────────┘
+
+  - queue: requests not yet admitted, served first come, first served.
+  - _admit_prefill (producer): takes requests off the queue while there is a free
+    prefilled row, enough free blocks (the queue waits rather than skip ahead) and room
+    in max_prefill_tokens; then prefills them all in ONE packed forward.
+  - prefilled (bounded buffer, at most prefilled_rows): requests whose blocks are written
+    and first token sampled, waiting for a decode row. Each holds its blocks meanwhile.
+  - _promote (consumer): a free decode row takes the oldest prefilled request -- its
+    block-table row and pos are copied over; the K/V stay where they are in the pool.
+  - _decode: ONE forward for all max_seqs decode rows, one new token each (CUDA: graph
+    replay + the Triton paged kernel). One device -> host copy of the tokens per step.
+  - _retire: a request that hit end-of-text, max_new_tokens or a full cache returns its
+    text and gives its row and blocks back -- feeding the next _promote / _admit_prefill.
+  - Order within a step: _promote, _admit_prefill, _promote, _decode, _retire. The second
+    _promote lets requests prefilled this step start decoding at once if rows are free.
+
+Memory layout of the block table / pos (PagedKVCache):
+
+    rows [0, max_seqs)                          decode rows: decoded every step
+    rows [max_seqs, max_seqs + prefilled_rows)  prefilled rows: waiting for a decode row
+
 Policy: reserve at admission. A request gets every block it can ever need when it
 is admitted, so nothing can run out mid-generation and no preemption is needed.
 (On-demand growth -- one block each time pos crosses a block boundary -- is the
@@ -24,6 +52,7 @@ so they never force a GPU sync.
 """
 
 import logging
+from collections import deque
 from math import ceil
 
 import torch
@@ -40,8 +69,31 @@ class PagedScheduler(BaseScheduler):
 
     def __init__(self, model, enc, config, max_seqs=4, block_size=16, num_blocks=None,
                  max_tokens=None, watermark=0, device='cpu', dtype=torch.float32,
-                 cuda_graph=False):
+                 cuda_graph=False, prefilled_rows=None, max_prefill_tokens=None):
+        """
+        model, enc, config  the loaded GPT, its tokenizer, its GPTConfig
+        max_seqs            decode rows: the most requests decoding at once (the batch size
+                            of every decode step)
+        block_size          tokens per KV block (16)
+        num_blocks          size of the shared KV pool in blocks, incl. the scratch block.
+                            Default: as much memory as a RowKVCache of max_seqs rows
+        max_tokens          W, the most tokens one request may hold (prompt + generated).
+                            Default: the model's context length
+        watermark           blocks kept free while other requests hold blocks, so running
+                            requests are not starved by a burst of admissions
+        device, dtype       where the pool lives and its precision
+        cuda_graph          generate(): replay the decode step as a CUDA graph, one graph
+                            per sampler setting (CUDA only)
+        prefilled_rows      capacity of the prefilled buffer: how many requests may be
+                            prefilled and waiting for a decode row at once. Each holds its
+                            blocks while it waits. Default: max_seqs (a full next batch).
+                            At least 1: every request passes through this buffer
+        max_prefill_tokens  prompt tokens one step may prefill. Bounds the stall a burst of
+                            new requests causes the running ones; the first prompt of a step
+                            always goes, however long. None = no cap
+        """
         super().__init__(model, enc, config, max_seqs, max_tokens, device)
+        
         if self.W % block_size:
             # the gathered width must equal W, or the shared mask no longer lines up
             raise ValueError(f'block_size {block_size} must divide max_tokens {self.W}')
@@ -51,14 +103,23 @@ class PagedScheduler(BaseScheduler):
         self.watermark = watermark
 
         self.allocator = BlockAllocator(num_blocks)
+        self.prefilled_rows = max_seqs if prefilled_rows is None else prefilled_rows
+        if self.prefilled_rows < 1:
+            raise ValueError('prefilled_rows must be >= 1: every request is prefilled into '
+                             'the prefilled buffer before it takes a decode row')
+        self.max_prefill_tokens = max_prefill_tokens      # None: no cap per step
         self.cache = PagedKVCache(config, num_blocks, block_size, max_seqs,
-                                  self.W // block_size, device, dtype)
+                                  self.W // block_size, device, dtype,
+                                  prefilled_rows=self.prefilled_rows)
 
         # host mirrors: every scheduling decision reads these, never the GPU
         self.row_blocks_cpu = [[] for _ in range(self.B)]
         self.row_len_cpu = [0] * self.B
         self.active_cpu = [False] * self.B                 # CPU mirror of active_gpu: every decision reads this
         self.num_active_cpu = 0
+        # prefilled requests waiting for a decode row, oldest first, and free prefilled rows
+        self.prefilled = deque()
+        self.free_prefilled_rows = list(range(self.B, self.B + self.prefilled_rows))
 
         self.peak_active = 0                      # most requests resident at once
         self.peak_blocks = 0                      # most blocks in use at once
@@ -72,7 +133,8 @@ class PagedScheduler(BaseScheduler):
     # -- decisions from host mirrors ------------------------------------------
 
     def _has_active(self):
-        return self.num_active_cpu > 0               # host int: no sync (was active_gpu.any())
+        # host ints, no sync. Prefilled requests count: they still need rows and decoding.
+        return self.num_active_cpu > 0 or bool(self.prefilled)
 
     def _sampler_for(self, params):
         if not self.cuda_graph:
@@ -96,20 +158,25 @@ class PagedScheduler(BaseScheduler):
     # -- the three operations --------------------------------------------------
 
     def _admit(self, queue, prompt_ids, sampler, max_new_tokens):
-        """Admit queued requests, in order, while free rows AND free blocks allow; then
-        prefill everything admitted this step in ONE packed forward."""
-        rows, reqs = [], []
-        for row in range(self.B):
-            if not queue:
-                break
-            if self.active_cpu[row]:
-                continue
+        """Two stages: prefilled requests take free decode rows; waiting requests are
+        prefilled (one packed forward) into the prefilled buffer; then promote again so fresh
+        prefills start decoding this step if rows are free."""
+        self._promote()
+        self._admit_prefill(queue, prompt_ids, sampler, max_new_tokens)
+        self._promote()
 
+    def _admit_prefill(self, queue, prompt_ids, sampler, max_new_tokens):
+        """Waiting -> prefilled, in order, while prefilled rows, free blocks and the token
+        budget allow; then ONE packed prefill for all of them."""
+        slots, reqs, tokens = [], [], 0
+        while queue and len(slots) < len(self.free_prefilled_rows):
             req, _ = queue[0]
             L = len(prompt_ids[req])
             if L == 0 or L + max_new_tokens > self.W:
                 raise ValueError(f'request {req}: prompt of {L} tokens does not fit '
                                  f'(cache width {self.W} leaves room for {self.W - max_new_tokens})')
+            if self.max_prefill_tokens and slots and tokens + L > self.max_prefill_tokens:
+                break                                 # budget spent; the first prompt always goes
 
             need = ceil((L + max_new_tokens) / self.bs)
             if need > self.allocator.capacity:
@@ -117,10 +184,10 @@ class PagedScheduler(BaseScheduler):
                 raise ValueError(f'request {req}: needs {need} blocks, the pool can never '
                                  f'provide more than {self.allocator.capacity} -- it will never fit')
 
-            # Headroom only matters when something is running (or being admitted) that will
-            # free blocks. With nothing active the whole pool is free and the check above
-            # guarantees the request fits -- so ignoring the watermark prevents a spin.
-            busy = self.num_active_cpu + len(rows)
+            # Headroom only matters when something holds blocks that will come back. With
+            # nothing running, prefilled or being admitted, the whole pool is free and the check
+            # above guarantees the request fits -- so ignoring the watermark prevents a spin.
+            busy = self.num_active_cpu + len(self.prefilled) + len(slots)
             headroom = self.watermark if busy else 0
             if self.allocator.num_free - need < headroom:
                 if not busy:                          # unreachable given the checks above
@@ -134,31 +201,47 @@ class PagedScheduler(BaseScheduler):
                 break                                 # FCFS: later requests may not skip ahead
 
             queue.popleft()
+            slot = self.free_prefilled_rows[len(slots)]
             blocks = self.allocator.allocate(need)
-            self.row_blocks_cpu[row] = blocks
-            self.cache.set_blocks(row, blocks)        # before the prefill writes into them
-            rows.append(row)
-            reqs.append(req)
+            self.cache.set_blocks(slot, blocks)       # before the prefill writes into them
+            slots.append(slot)
+            reqs.append((req, blocks, L))
+            tokens += L
             self._waiting_req = None
-        if not rows:
+        if not slots:
             return
 
-        first = self._prefill(rows, [prompt_ids[r] for r in reqs], sampler)
-        for row, req, tok in zip(rows, reqs, first):
-            self.slot_req_cpu[row] = req
-            self.generated_cpu[req] = [tok]
+        del self.free_prefilled_rows[:len(slots)]
+        _, first = self._prefill(slots, [prompt_ids[r] for r, _, _ in reqs], sampler)
+        for slot, (req, blocks, L), tok in zip(slots, reqs, first):
+            self.generated_cpu[req] = [tok]           # the first token exists from here on
+            self.prefilled.append(dict(slot=slot, req=req, blocks=blocks, length=L, token=tok))
+        self.peak_blocks = max(self.peak_blocks, self.allocator.capacity - self.allocator.num_free)
+        log.info('prefill %d prompt(s), %d tokens in one forward -> %d prefilled, waiting '
+                 'for rows', len(slots), tokens, len(self.prefilled))
+
+    def _promote(self):
+        """Prefilled -> decoding: each free decode row takes the oldest prefilled request."""
+        for row in range(self.B):
+            if not self.prefilled:
+                break
+            if self.active_cpu[row]:
+                continue
+            s = self.prefilled.popleft()
+            self.cache.promote(s['slot'], row)        # block-table row + pos, in place
+            self.free_prefilled_rows.append(s['slot'])
+            self.next_token_gpu[row] = s['token']
+            self.active_gpu[row] = True
+            self.slot_req_cpu[row] = s['req']
             self.active_cpu[row] = True
-            self.row_len_cpu[row] = len(prompt_ids[req])
+            self.row_len_cpu[row] = s['length']
+            self.row_blocks_cpu[row] = s['blocks']
             self.num_active_cpu += 1
             log.info('admit  req %d -> row %d: prompt %d tokens, %d blocks %s, '
                      '%d/%d blocks free, %d active',
-                     req, row, len(prompt_ids[req]), len(self.row_blocks_cpu[row]),
-                     _short(self.row_blocks_cpu[row]), self.allocator.num_free,
-                     self.allocator.capacity, self.num_active_cpu)
+                     s['req'], row, s['length'], len(s['blocks']), _short(s['blocks']),
+                     self.allocator.num_free, self.allocator.capacity, self.num_active_cpu)
         self.peak_active = max(self.peak_active, self.num_active_cpu)
-        self.peak_blocks = max(self.peak_blocks, self.allocator.capacity - self.allocator.num_free)
-        log.debug('prefill: %d prompt(s), %d tokens in one forward', len(rows),
-                  sum(len(prompt_ids[r]) for r in reqs))
 
     def _decode(self, sampler):
         """One token for every row. Graph replay if captured, else the eager forward."""
@@ -166,7 +249,7 @@ class PagedScheduler(BaseScheduler):
             self.graph.replay()                       # one launch replaces hundreds
         else:
             logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
-                                   pos_ids=self.cache.pos_gpu.unsqueeze(1),
+                                   pos_ids=self.cache.seq_len().unsqueeze(1),
                                    attn_mask=self._mask(), cache_active=self.active_gpu)
             tok = sampler(logits[:, -1, :self.enc.n_vocab])    # (B, 1), still on the GPU
             self.next_token_gpu.copy_(tok)                # in place: the same buffer every step
@@ -220,6 +303,8 @@ class PagedScheduler(BaseScheduler):
         self.row_len_cpu = [0] * self.B
         self.active_cpu = [False] * self.B
         self.num_active_cpu = 0
+        self.prefilled = deque()
+        self.free_prefilled_rows = list(range(self.B, self.B + self.prefilled_rows))
         self.peak_active = 0
         self.peak_blocks = 0
         self.decode_steps = 0
@@ -261,7 +346,7 @@ class PagedScheduler(BaseScheduler):
         """The captured work. Reads and writes only fixed buffers: next_token, active,
         cache.pos_gpu, cache.block_table_gpu and the K/V pools -- all updated in place."""
         logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
-                               pos_ids=self.cache.pos_gpu.unsqueeze(1),
+                               pos_ids=self.cache.seq_len().unsqueeze(1),
                                attn_mask=self._mask(), cache_active=self.active_gpu)
         tok = self.graph_sampler(logits[:, -1, :self.enc.n_vocab])        # on the GPU
         self.next_token_gpu.copy_(tok)

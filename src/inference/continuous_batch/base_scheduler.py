@@ -105,8 +105,9 @@ class BaseScheduler(BaseEngine):
         """Prefill several fresh requests in ONE forward: their prompts packed end to
         end, no padding. rows: each request's slot. prompts: their token-id lists.
 
-        Writes each request's k/v into its slot, samples every first token, and returns
-        them as a list -- one device -> host copy for the whole batch.
+        Writes each request's k/v into its slot and samples every first token. Returns
+        them twice: on the device (N, 1), and as a list -- one device -> host copy for the
+        whole batch.
         """
         batch = PrefillBatch.build(rows, [len(p) for p in prompts], self.device)
         idx = torch.tensor([t for p in prompts for t in p], dtype=torch.long,
@@ -114,9 +115,7 @@ class BaseScheduler(BaseEngine):
         logits, _ = self.model(idx, kv_cache=self.cache, pos_ids=batch.positions.unsqueeze(0),
                                prefill=batch)                            # (1, N, vocab): last tokens
         first = sampler(logits[0, :, :self.enc.n_vocab])                 # (N, 1)
-        self.next_token_gpu[batch.slots_gpu] = first
-        self.active_gpu[batch.slots_gpu] = True
-        return first.view(-1).tolist()                                    # the one sync
+        return first, first.view(-1).tolist()                             # the one sync
 
     def _mask(self):
         """Which cache columns each row may attend to, derived from pos.
@@ -125,7 +124,7 @@ class BaseScheduler(BaseEngine):
         to see itself. `& active` blanks free rows.
         """
         cols = torch.arange(self.W, device=self.device)
-        return (cols <= self.cache.pos_gpu.unsqueeze(1)) & self.active_gpu.unsqueeze(1)
+        return (cols <= self.cache.seq_len().unsqueeze(1)) & self.active_gpu.unsqueeze(1)
 
     def _reset(self):
         """Back to empty, IN PLACE: a captured CUDA graph holds these buffers' addresses."""

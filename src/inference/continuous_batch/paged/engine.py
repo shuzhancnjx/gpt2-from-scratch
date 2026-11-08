@@ -92,10 +92,11 @@ class PagedEngine(ContinuousEngine):
 
     def _run(self, prompts, sampling_params):
         """The loop. Returns {prompt index: generated token ids}."""
+        prompt_ids = [self.enc.encode(p) for p in prompts]    # before the run starts
         self.runner.start(sampling_params)             # graphs captured before, never during
         self.blocks.reset()
         self.scheduler.reset()
-        self.scheduler.add([self.enc.encode(p) for p in prompts])
+        self.scheduler.add(prompt_ids)
         while not self.scheduler.done():
             self.step(sampling_params)
         return self.scheduler.finished

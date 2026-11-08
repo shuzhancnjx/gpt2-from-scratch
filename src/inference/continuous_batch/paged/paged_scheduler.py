@@ -141,9 +141,14 @@ class PagedScheduler(BaseScheduler):
         return self.num_active_cpu > 0 or bool(self.prefilled)
 
     def _prepare(self, sampling_params):
-        """Before a run (no row active): capture the decode graph for these settings if new."""
+        """Before a run (no row active): capture every graph the run may replay, so no
+        capture lands inside a served -- or timed -- step. Decode: the graph for these
+        sampler settings. Prefill: every bucket (each graph is cached; re-preparing is free)."""
         if self.decode_graphs is not None:
             self.decode_graphs.prepare(self.decode_graphs.key(sampling_params))
+        if self.prefill_graphs is not None:
+            for T in self.prefill_graphs.buckets:
+                self.prefill_graphs.prepare(T)
 
     # -- the three operations --------------------------------------------------
 

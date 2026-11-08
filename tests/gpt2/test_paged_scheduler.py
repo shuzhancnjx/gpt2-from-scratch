@@ -361,7 +361,8 @@ def test_prefill_graphs_match_eager(parts):
     graphed = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W,
                              device='cuda', cuda_graph=True)
     assert graphed.run(prompts, max_new_tokens=6) == eager.run(prompts, max_new_tokens=6)
-    assert len(graphed.prefill_graphs) >= 1, 'no prefill bucket was ever replayed'
+    assert len(graphed.prefill_graphs) == len(graphed.prefill_graphs.buckets), \
+        'every bucket should be captured before the run'
     assert torch.all(graphed.cache.block_table_gpu[graphed.cache.pad_row] == SCRATCH)
     assert graphed.allocator.num_free == graphed.allocator.capacity
 
@@ -376,7 +377,7 @@ def test_oversized_prefill_falls_back_to_eager(parts):
     graphed.prefill_graphs.buckets = (4,)                  # every real batch overflows it
     eager = PagedScheduler(model, enc, cfg, max_seqs=3, block_size=4, max_tokens=W, device='cuda')
     assert graphed.run(PROMPTS, max_new_tokens=4) == eager.run(PROMPTS, max_new_tokens=4)
-    assert len(graphed.prefill_graphs) == 0
+    assert len(graphed.prefill_graphs) == 1, 'the one bucket is captured up front, never replayed'
 
 
 def test_graph_objects_are_not_tested_for_truth(parts):

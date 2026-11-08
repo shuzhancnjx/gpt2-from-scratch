@@ -22,7 +22,7 @@ from inference.continuous_batch.base_scheduler import BaseScheduler
 from inference.cuda_graph import BaseGraphs
 
 # Small buckets: prefill graphs pay off on small, launch-bound prefills (the token budget
-# keeps them <= 512 tokens); a bigger batch is GPU-bound -- it runs eagerly, padding-free.
+# keeps them <= 1024 tokens); a bigger batch is GPU-bound -- it runs eagerly, padding-free.
 BUCKETS = (64, 128, 256, 512, 1024)
 
 

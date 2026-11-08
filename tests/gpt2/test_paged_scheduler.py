@@ -402,6 +402,6 @@ def test_prefill_budget_auto_caps_with_graphs(parts):
     model, enc, cfg = parts
     s = PagedScheduler(model.to('cuda'), enc, cfg, max_seqs=2, block_size=4, max_tokens=W,
                        device='cuda', cuda_graph=True)
-    assert s.max_prefill_tokens == 512
+    assert s.max_prefill_tokens == 1024
     assert PagedScheduler(model, enc, cfg, max_seqs=2, block_size=4, max_tokens=W, device='cuda',
                           cuda_graph=True, max_prefill_tokens=None).max_prefill_tokens is None

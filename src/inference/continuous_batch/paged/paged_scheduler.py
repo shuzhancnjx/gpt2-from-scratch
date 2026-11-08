@@ -92,10 +92,11 @@ class PagedScheduler(BaseScheduler):
                             At least 1: every request passes through this buffer
         max_prefill_tokens  prompt tokens one step may prefill: bounds the stall a burst of new
                             requests causes the running ones (the first prompt of a step always
-                            goes, however long). 'auto' (default): 512 when CUDA graphs are on --
-                            graphed prefill costs scale with tokens, so a cap is cheap (measured:
-                            worst step 18 -> 6 ms for -4% tok/s) -- and no cap otherwise, where
-                            each eager prefill pays ~10 ms of fixed cost. None = no cap.
+                            goes, however long). 'auto' (default): 1024 when CUDA graphs are on --
+                            graphed prefill cost scales with tokens, so a cap is cheap (A100: vs no
+                            cap, +1% tok/s, -8% TTFT, worst step 18.8 -> 8.4 ms; 512 trims that to
+                            6.5 ms for -4% tok/s) -- and no cap otherwise, where each eager prefill
+                            pays ~10 ms of fixed cost. None = no cap.
         """
         super().__init__(model, enc, config, max_seqs, max_tokens, device)
         
@@ -136,7 +137,7 @@ class PagedScheduler(BaseScheduler):
             self.decode_graphs = DecodeGraphs(self)
             self.prefill_graphs = PrefillGraphs(self)
         if max_prefill_tokens == 'auto':
-            max_prefill_tokens = 512 if self.prefill_graphs is not None else None
+            max_prefill_tokens = 1024 if self.prefill_graphs is not None else None
         self.max_prefill_tokens = max_prefill_tokens      # None: no cap per step
 
     # -- decisions from host mirrors ------------------------------------------

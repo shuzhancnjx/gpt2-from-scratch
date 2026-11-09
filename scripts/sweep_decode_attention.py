@@ -20,6 +20,7 @@ import argparse
 import torch
 
 from inference.continuous_batch.paged.attention.decode_attention import decode_attention
+from _common import graph_us
 
 
 def make(rows, ctx, heads=12, head_dim=64, block_size=16, dtype=torch.float16):
@@ -36,30 +37,6 @@ def make(rows, ctx, heads=12, head_dim=64, block_size=16, dtype=torch.float16):
                 block_table=table, seq_lens=seq_lens, slots=slots)
     kv_bytes = rows * ctx * heads * head_dim * 2 * torch.finfo(dtype).bits // 8
     return args, kv_bytes
-
-
-def graph_us(fn, reps=200):
-    """GPU time of fn, captured in a CUDA graph and replayed (no launch overhead)."""
-    for _ in range(3):
-        fn()
-    side = torch.cuda.Stream()
-    side.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(side):
-        for _ in range(3):
-            fn()
-    torch.cuda.current_stream().wait_stream(side)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        fn()
-    start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    graph.replay()
-    torch.cuda.synchronize()
-    start.record()
-    for _ in range(reps):
-        graph.replay()
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) / reps * 1e3
 
 
 def copy_bandwidth():

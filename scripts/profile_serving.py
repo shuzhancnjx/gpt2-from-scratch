@@ -22,7 +22,6 @@ Chrome trace (open in https://ui.perfetto.dev) showing the decode-step timeline.
 
 import argparse
 import os
-import random
 import time
 
 import tiktoken
@@ -32,17 +31,7 @@ from torch.profiler import ProfilerActivity, profile, record_function
 from utils.device import default_dtype, pick_device, synchronize
 from model.gpt2.gpt import GPT, GPTConfig
 from inference.continuous_batch import PagedEngine, RowEngine
-
-MODELS = {
-    '124m': dict(vocab_size=50304, n_layer=12, n_head=12, n_embd=768, block_size=1024),
-    'tiny': dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=64, block_size=256),
-}
-
-
-def make_prompts(enc, n, lo, hi, seed):
-    rng = random.Random(seed)
-    return [enc.decode([rng.randrange(50000) for _ in range(rng.randint(lo, hi))])
-            for _ in range(n)]
+from _common import MODELS, random_prompts
 
 
 def instrument(sched, device):
@@ -111,7 +100,7 @@ def main():
     torch.manual_seed(args.seed)
     model = GPT(cfg).eval().to(device=device, dtype=dtype)
     enc = tiktoken.get_encoding('gpt2')
-    prompts = make_prompts(enc, args.num_prompts, args.prompt_min, args.prompt_max, args.seed)
+    prompts = random_prompts(enc, args.num_prompts, args.prompt_min, args.prompt_max, args.seed)
     num_blocks = 1 + args.row_slots * W // args.block_size           # same KV memory as the row cache
 
     name = torch.cuda.get_device_name() if device.startswith('cuda') else device

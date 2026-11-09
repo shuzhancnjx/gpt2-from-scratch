@@ -42,11 +42,8 @@ from inference.continuous_batch import PagedEngine
 from inference.sampling import SamplingParams
 from model.gpt2 import GPT, GPTConfig
 from utils.device import default_dtype, pick_device, synchronize
+from _common import MODELS
 
-MODELS = {
-    '124m': dict(vocab_size=50304, n_layer=12, n_head=12, n_embd=768, block_size=1024),
-    'tiny': dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=64, block_size=256),
-}
 
 # substring -> category, first match wins (order matters: a GELU or an index kernel is
 # also an "elementwise" kernel by name)

@@ -20,7 +20,6 @@ import argparse
 import inspect
 import json
 import os
-import random
 import statistics
 import time
 
@@ -33,11 +32,7 @@ except ImportError:                                     # older code (via PYTHON
     from inference.continuous_batch import PagedScheduler
 from model.gpt2 import GPT, GPTConfig
 from utils.device import default_dtype, pick_device, synchronize
-
-MODELS = {
-    '124m': dict(vocab_size=50304, n_layer=12, n_head=12, n_embd=768, block_size=1024),
-    'tiny': dict(vocab_size=50304, n_layer=2, n_head=2, n_embd=64, block_size=256),
-}
+from _common import MODELS, random_prompts
 
 
 class FirstTokenClock(dict):
@@ -142,9 +137,7 @@ def main():
     torch.manual_seed(args.seed)
     model = GPT(cfg).eval().to(device=device, dtype=dtype)
     enc = tiktoken.get_encoding('gpt2')
-    rng = random.Random(args.seed)
-    prompts = [enc.decode([rng.randrange(50000) for _ in range(rng.randint(args.prompt_min, args.prompt_max))])
-               for _ in range(args.num_prompts)]
+    prompts = random_prompts(enc, args.num_prompts, args.prompt_min, args.prompt_max, args.seed)
 
     accepts = inspect.signature(PagedScheduler.__init__).parameters
     print(f'[{args.label}] device {device}  {args.num_prompts} prompts '

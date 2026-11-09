@@ -125,8 +125,7 @@ class GptInference(BaseEngine):
             else: 
                 step.token.copy_(next_token)
                 step.pos.copy_(row_pos.unsqueeze(1))
-                step.graph.replay() 
-                logits = step.logits
+                logits = step.replay()
 
         self._sync() 
         decode_s = time.perf_counter() - t0 

@@ -2,9 +2,9 @@
 
 Shared by every captured step in the engines:
 
-    decode   DecodeGraphs        one graph per sampler setting   (paged/graph/decode_graph.py)
-    prefill  PrefillGraphs       one graph per padded token count (paged/graph/prefill_graph.py)
-    (static_batch.DecodeStep follows the same recipe)
+    decode   DecodeGraphs        one graph per sampler setting   (continuous_batch/graph/decode_graph.py)
+    prefill  PrefillGraphs       one graph per padded token count (continuous_batch/graph/prefill_graph.py)
+    static   DecodeStep          one CapturedGraph per (B, W)     (static_batch/decode_step.py)
 
 Three layers, all here:
 

@@ -130,10 +130,11 @@ class Engine(threading.Thread):
             return
         seconds = time.perf_counter() - t0
         self.runs += 1
-        generated = getattr(engine, 'generated_cpu', {})
+        generated = getattr(engine, 'generated', {})
+        stats = getattr(engine, 'stats', None)
         log.info('batch %d done in %.2fs: %d decode steps, peak %s blocks / %s requests resident',
-                 self.runs, seconds, getattr(engine, 'decode_steps', 0),
-                 getattr(engine, 'peak_blocks', '-'), getattr(engine, 'peak_active', '-'))
+                 self.runs, seconds, getattr(stats, 'decode_steps', 0),
+                 getattr(stats, 'peak_blocks', '-'), getattr(stats, 'peak_active', '-'))
         for i, (job, text) in enumerate(zip(group, outs)):
             # schedulers record ids per prompt; the static engine doesn't, so re-encode
             tokens = len(generated[i]) if i in generated else len(self.llm.enc.encode(text))
@@ -141,8 +142,8 @@ class Engine(threading.Thread):
                 text=text, tokens=tokens,
                 stats=dict(batch_size=len(group), gathered=gathered, seconds=round(seconds, 2),
                            tokens=tokens,
-                           resident=getattr(engine, 'peak_active', None),
-                           blocks=getattr(engine, 'peak_blocks', None))))
+                           resident=getattr(stats, 'peak_active', None),
+                           blocks=getattr(stats, 'peak_blocks', None))))
 
 
 # -- request and response shapes --------------------------------------------------------------

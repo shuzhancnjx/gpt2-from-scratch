@@ -171,10 +171,10 @@ def test_scheduler_matches_the_uncached_path(sched_parts):
     Catches per-row position errors, mask drift, and one request seeing another's
     keys -- none of which raise on their own.
     """
-    from inference.continuous_batch import Scheduler
+    from inference.continuous_batch import RowEngine
     model, enc, cfg = sched_parts
 
-    got = Scheduler(model, enc, cfg, batch_size=2, max_tokens=64).run(PROMPTS, max_new_tokens=6)
+    got = RowEngine(model, enc, cfg, batch_size=2, max_tokens=64).run(PROMPTS, max_new_tokens=6)
     expected = [greedy_reference(model, enc, p, 6) for p in PROMPTS]
 
     assert got == expected
@@ -182,23 +182,23 @@ def test_scheduler_matches_the_uncached_path(sched_parts):
 
 def test_slots_are_reused_across_requests(sched_parts):
     """More prompts than slots: the batch width is fixed, the occupants rotate."""
-    from inference.continuous_batch import Scheduler
+    from inference.continuous_batch import RowEngine
     model, enc, cfg = sched_parts
 
-    sched = Scheduler(model, enc, cfg, batch_size=2, max_tokens=64)
+    sched = RowEngine(model, enc, cfg, batch_size=2, max_tokens=64)
     out = sched.run(PROMPTS * 2, max_new_tokens=4)
 
     assert len(out) == 8
-    assert not bool(sched.active_gpu.any()), 'slots left occupied after the run'
-    assert sched.cache.pos_gpu.tolist() == [0, 0], 'released rows should be back at zero'
+    assert not bool(sched.runner.active_gpu.any()), 'slots left occupied after the run'
+    assert sched.runner.cache.pos_gpu.tolist() == [0, 0], 'released rows should be back at zero'
 
 
 def test_batch_width_does_not_change_output(sched_parts):
     """Same prompts through 1, 2 and 4 slots must produce identical text."""
-    from inference.continuous_batch import Scheduler
+    from inference.continuous_batch import RowEngine
     model, enc, cfg = sched_parts
 
-    runs = [Scheduler(model, enc, cfg, batch_size=b, max_tokens=64)
+    runs = [RowEngine(model, enc, cfg, batch_size=b, max_tokens=64)
             .run(PROMPTS, max_new_tokens=5) for b in (1, 2, 4)]
 
     assert runs[0] == runs[1] == runs[2]
@@ -206,10 +206,10 @@ def test_batch_width_does_not_change_output(sched_parts):
 
 def test_a_short_request_does_not_wait_for_a_long_one(sched_parts):
     """A row that hits its cap is released while its neighbour keeps going."""
-    from inference.continuous_batch import Scheduler
+    from inference.continuous_batch import RowEngine
     model, enc, cfg = sched_parts
 
-    sched = Scheduler(model, enc, cfg, batch_size=2, max_tokens=64)
+    sched = RowEngine(model, enc, cfg, batch_size=2, max_tokens=64)
     out = sched.run(['Hello', 'The capital of France is'], max_new_tokens=3)
 
     assert len(out) == 2
@@ -217,10 +217,10 @@ def test_a_short_request_does_not_wait_for_a_long_one(sched_parts):
 
 
 def test_prompt_too_long_for_the_cache_is_rejected(sched_parts):
-    from inference.continuous_batch import Scheduler
+    from inference.continuous_batch import RowEngine
     model, enc, cfg = sched_parts
 
-    sched = Scheduler(model, enc, cfg, batch_size=1, max_tokens=8)
+    sched = RowEngine(model, enc, cfg, batch_size=1, max_tokens=8)
     with pytest.raises(ValueError, match='does not fit'):
         sched.run(['It was a bright cold day in April and the clocks'], max_new_tokens=6)
 
@@ -231,14 +231,14 @@ def test_mask_covers_written_slots_and_blanks_idle_rows(sched_parts):
     End-to-end text comparison is too weak here: argmax over a randomly
     initialised model picks the same token even with the mask badly wrong.
     """
-    from inference.continuous_batch import Scheduler
+    from inference.continuous_batch import RowEngine
     model, enc, cfg = sched_parts
 
-    sched = Scheduler(model, enc, cfg, batch_size=3, max_tokens=6)
-    sched.cache.pos_gpu = torch.tensor([2, 4, 0])
-    sched.active_gpu = torch.tensor([True, True, False])
+    sched = RowEngine(model, enc, cfg, batch_size=3, max_tokens=6)
+    sched.runner.cache.pos_gpu = torch.tensor([2, 4, 0])
+    sched.runner.active_gpu = torch.tensor([True, True, False])
 
-    m = sched._mask().int().tolist()
+    m = sched.runner.mask().int().tolist()
 
     # `<=` pos: the token written this step lands at column pos and sees itself
     assert m[0] == [1, 1, 1, 0, 0, 0]
@@ -252,22 +252,22 @@ def test_decode_feeds_per_row_positions_and_leaves_idle_slots_alone(sched_parts)
     Every decode forward must hand each row its own position, and a slot with no
     request must keep pos == 0 so the next admission finds it free.
     """
-    from inference.continuous_batch import Scheduler
+    from inference.continuous_batch import RowEngine
     model, enc, cfg = sched_parts
 
-    sched = Scheduler(model, enc, cfg, batch_size=2, max_tokens=64)
+    sched = RowEngine(model, enc, cfg, batch_size=2, max_tokens=64)
     seen = []
-    real = sched.model
+    real = sched.runner.model
 
     def spy(idx, **kwargs):
         # the prefill batch, not idx width: a one-token prompt prefills with T == 1 too
         if kwargs.get('prefill') is None:             # decode, not prefill
             seen.append((kwargs['pos_ids'].flatten().tolist(),
-                         sched.cache.pos_gpu.tolist(),
-                         sched.active_gpu.tolist()))
+                         sched.runner.cache.pos_gpu.tolist(),
+                         sched.runner.active_gpu.tolist()))
         return real(idx, **kwargs)
 
-    sched.model = spy
+    sched.runner.model = spy
     sched.run(PROMPTS[:3], max_new_tokens=4)
 
     assert seen, 'no decode step was observed'
@@ -278,10 +278,13 @@ def test_decode_feeds_per_row_positions_and_leaves_idle_slots_alone(sched_parts)
                 assert pos[row] == 0, f'idle slot {row} drifted to {pos[row]}'
 
 
-def test_base_scheduler_is_abstract():
-    """The loop lives in BaseScheduler; an engine must supply the four decisions."""
-    from inference.continuous_batch import BaseScheduler, PagedScheduler, Scheduler
+def test_engines_share_the_runner_and_the_loop_contract(sched_parts):
+    """Both continuous engines are ContinuousEngines (run/generate over an abstract _run)
+    and drive the same ModelRunner -- one copy of the model calls."""
+    from inference.continuous_batch import ContinuousEngine, ModelRunner, PagedEngine, RowEngine
+    model, enc, cfg = sched_parts
     with pytest.raises(TypeError):
-        BaseScheduler(None, None, None, 1, 8, 'cpu')
-    assert issubclass(Scheduler, BaseScheduler) and issubclass(PagedScheduler, BaseScheduler)
-    assert not issubclass(PagedScheduler, Scheduler), 'the engines are siblings, not parent/child'
+        ContinuousEngine()
+    for engine in (RowEngine(model, enc, cfg, batch_size=2, max_tokens=64),
+                   PagedEngine(model, enc, cfg, max_seqs=2, block_size=16, max_tokens=64)):
+        assert isinstance(engine, ContinuousEngine) and type(engine.runner) is ModelRunner

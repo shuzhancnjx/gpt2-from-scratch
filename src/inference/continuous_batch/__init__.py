@@ -1,16 +1,20 @@
 """Continuous batching: requests join and leave every step.
 
-base_scheduler.py  the abstract BaseScheduler: the admit -> decode -> retire loop, shared by both
-row/    one full-width row of KV memory per request (RowKVCache + Scheduler)
-paged/  fixed-size blocks from a shared pool (BlockAllocator, PagedKVCache,
-        PagedScheduler, and the Triton decode kernel in paged/paged_attention.py)
+continuous_engine.py  ContinuousEngine: run() / generate() over each engine's _run() loop
+model_runner.py       ModelRunner: the model calls, decode buffers and CUDA graphs -- shared
+row/    one full-width KV row per request: RowEngine + RowKVCache -- the simple baseline
+paged/  KV blocks from a shared pool: PagedEngine, the orchestrator of PagedScheduler
+        (policy), BlockManager (memory, block/) and the ModelRunner (PagedKVCache, the
+        Triton kernel in paged_attention.py, CUDA graphs in graph/)
 """
 
-from inference.continuous_batch.base_scheduler import BaseScheduler
-from inference.continuous_batch.paged.block_allocator import BlockAllocator
+from inference.continuous_batch.continuous_engine import ContinuousEngine
+from inference.continuous_batch.model_runner import ModelRunner
+from inference.continuous_batch.paged.block.block_allocator import BlockAllocator
 from inference.continuous_batch.paged.paged_cache import PagedKVCache
-from inference.continuous_batch.paged.paged_scheduler import PagedScheduler
+from inference.continuous_batch.paged.engine import PagedEngine
 from inference.continuous_batch.row.row_cache import RowKVCache
-from inference.continuous_batch.row.scheduler import Scheduler
+from inference.continuous_batch.row.engine import RowEngine
 
-__all__ = ['BaseScheduler', 'BlockAllocator', 'PagedKVCache', 'PagedScheduler', 'RowKVCache', 'Scheduler']
+__all__ = ['BlockAllocator', 'ContinuousEngine', 'ModelRunner', 'PagedKVCache', 'PagedEngine',
+           'RowKVCache', 'RowEngine']

@@ -4,7 +4,7 @@ An eager prefill forward costs ~10 ms of kernel launches whatever its size. A gr
 replays all of them with one launch. A graph needs fixed shapes, so:
 
     tokens   pad sum(lens) up to a bucket T (BUCKETS)
-    prompts  always N = sched.prefilled_rows entries; unused entries are dummies
+    prompts  always N = runner.max_prefill_prompts entries; unused entries are dummies
     padding  padding tokens use the cache's pad row (all SCRATCH): they write only the
              scratch block and attend one scratch slot -- their output is never read
 
@@ -13,12 +13,11 @@ request's blocks, up to its own position, through the Triton kernel.
 
 Needs from the rest of the engine (to add alongside this file):
   - PagedKVCache.pad_row: one extra block-table row that is always SCRATCH
-  - PagedScheduler._prefill: try PrefillGraphs.run first; None -> the eager forward
-  - PagedScheduler: build PrefillGraphs when the decode graph is captured (CUDA)
+  - PagedEngine._prefill: try PrefillGraphs.run first; None -> the eager forward
+  - PagedEngine: build PrefillGraphs when the decode graph is captured (CUDA)
 """
 import torch 
 from inference.base_kv_cache import PrefillBatch
-from inference.continuous_batch.base_scheduler import BaseScheduler
 from inference.cuda_graph import BaseGraphs
 
 # Small buckets: prefill graphs pay off on small, launch-bound prefills (the token budget
@@ -27,14 +26,14 @@ BUCKETS = (64, 128, 256, 512, 1024)
 
 
 class PrefillGraphs(BaseGraphs):
-    """Prefill graphs for one PagedScheduler.
+    """Prefill graphs for one PagedEngine.
 
-    sched:    the scheduler (its model, cache, device and prefilled_rows are used)
+    runner:   the ModelRunner (its model, cache, device and max_prefill_prompts are used)
     buckets:  padded token counts to capture, smallest first
     """
 
-    def __init__(self, sched, buckets=BUCKETS):
-        super().__init__(sched)                       # CUDA check, self.sched, self.graphs
+    def __init__(self, runner, buckets=BUCKETS):
+        super().__init__(runner)                      # CUDA check, self.runner, self.graphs
         self.buckets = tuple(sorted(buckets))
         self._bufs = {}
 
@@ -61,7 +60,7 @@ class PrefillGraphs(BaseGraphs):
         Returns them as a dict.
         """
 
-        cache, device, N = self.sched.cache, self.sched.device, self.sched.prefilled_rows 
+        cache, device, N = self.runner.cache, self.runner.device, self.runner.max_prefill_prompts
         pad = cache.pad_row 
 
         long = dict(dtype=torch.long, device=device)
@@ -77,11 +76,11 @@ class PrefillGraphs(BaseGraphs):
 
     def _build(self, T):
         """GraphCache's build(): make bucket T's buffers (kept in self._bufs[T], filled by
-        run() before each replay) and return the body: the base scheduler's prefill model
-        call (_prefill_logits) on those buffers -- logits (1, N, vocab)."""
+        run() before each replay) and return the body: the runner's prefill model
+        call (prefill_logits) on those buffers -- logits (1, N, vocab)."""
         buf = self._bufs[T] = self._buffers(T)
-        sched = self.sched
-        return lambda: BaseScheduler._prefill_logits(sched, buf['idx'], buf['batch']) 
+        runner = self.runner
+        return lambda: runner.prefill_logits(buf['idx'], buf['batch'])
 
     def run(self, slots, prompts, sampling_params):
         """Prefill these prompts into these slots with one graph replay, then sample.
@@ -103,11 +102,11 @@ class PrefillGraphs(BaseGraphs):
         self.prepare(T)                               # capture if new (padding-only warm-up)
         graph = self.graphs.get(T)
 
-        buf, pad = self._bufs[T], self.sched.cache.pad_row 
-        real = PrefillBatch.build(slots, lens, self.sched.device)
+        buf, pad = self._bufs[T], self.runner.cache.pad_row
+        real = PrefillBatch.build(slots, lens, self.runner.device)
         b = buf['batch']
 
-        ids = torch.tensor([t for p in prompts for t in p], dtype=torch.long, device=self.sched.device)
+        ids = torch.tensor([t for p in prompts for t in p], dtype=torch.long, device=self.runner.device)
         buf['idx'][0, :total].copy_(ids);          buf['idx'][0, total:].zero_()
         b.rows[:total].copy_(real.rows);           b.rows[total:].fill_(pad)
         b.positions[:total].copy_(real.positions); b.positions[total:].zero_()
@@ -116,5 +115,5 @@ class PrefillGraphs(BaseGraphs):
         b.last[:n].copy_(real.last);               b.last[n:].zero_() 
 
         logits = graph.replay()[0, :n]                            # (n, vocab): real prompts
-        return sampling_params.sampler()(logits[:, :self.sched.enc.n_vocab])      # (n, 1)
+        return sampling_params.sampler()(logits[:, :self.runner.enc.n_vocab])     # (n, 1)
     

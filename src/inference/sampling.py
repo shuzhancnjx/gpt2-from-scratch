@@ -66,7 +66,7 @@ def make_sampler(temperature=1.0, top_k=None, top_p=None):
 class SamplingParams:
     """How to generate: shared by every engine's generate().
 
-    Frozen, so it is hashable: PagedScheduler keeps one captured CUDA graph per
+    Frozen, so it is hashable: PagedEngine keeps one captured CUDA graph per
     distinct SamplingParams (a graph fixes its sampler when it is recorded).
     temperature 0 means greedy.
     """

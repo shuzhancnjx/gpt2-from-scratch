@@ -27,7 +27,10 @@ import time
 import tiktoken
 import torch
 
-from inference.continuous_batch import PagedScheduler
+try:                                                    # this code: the engine split
+    from inference.continuous_batch import PagedEngine as PagedScheduler
+except ImportError:                                     # older code (via PYTHONPATH)
+    from inference.continuous_batch import PagedScheduler
 from model.gpt2 import GPT, GPTConfig
 from utils.device import default_dtype, pick_device, synchronize
 
@@ -38,11 +41,11 @@ MODELS = {
 
 
 class FirstTokenClock(dict):
-    """generated_cpu replacement: notes when each request's first token appears."""
+    """Older code's generated_cpu replacement: notes when each request's first token appears."""
 
-    def __init__(self, t0):
+    def __init__(self, t0, ttft):
         super().__init__()
-        self.t0, self.ttft = t0, {}
+        self.t0, self.ttft = t0, ttft
 
     def __setitem__(self, req, tokens):
         if req not in self:
@@ -51,20 +54,53 @@ class FirstTokenClock(dict):
 
 
 def instrument(sched):
-    """Wrap the scheduler's own hooks; returns the dict the timings land in."""
-    rec = dict(steps=[], ttft={}, prefills=[])
-    reset, record = sched._reset, sched._record_tokens
+    """Wrap the engine's own hooks; returns the dict the timings land in. Each wrapped call
+    already follows a device -> host copy, so no extra sync is added."""
+    rec = dict(steps=[], prefills=[])
 
-    def timed_reset():
-        reset()
+    def start():
         rec['t0'] = rec['last'] = time.perf_counter()
-        sched.generated_cpu = rec['clock'] = FirstTokenClock(rec['t0'])
+        rec['ttft'] = {}
 
-    def timed_record():
-        record()                                         # its .tolist() is the step's sync
+    def step_done():
         now = time.perf_counter()
         rec['steps'].append(now - rec['last'])
         rec['last'] = now
+
+    if hasattr(sched, 'scheduler'):                     # PagedEngine
+        s, r = sched.scheduler, sched.runner
+        reset, prefilled_with, update, prefill = s.reset, s.prefilled_with, s.update, r.prefill
+
+        def timed_reset():
+            reset(); start()
+
+        def timed_prefilled_with(admissions, first):     # first tokens just copied to the CPU
+            prefilled_with(admissions, first)
+            now = time.perf_counter() - rec['t0']
+            for a in admissions:
+                rec['ttft'].setdefault(a.req, now)
+
+        def timed_update(tokens, max_new):               # decode tokens just copied to the CPU
+            out = update(tokens, max_new); step_done(); return out
+
+        def counted_prefill(rows, prompts, sp):
+            rec['prefills'].append(sum(len(p) for p in prompts))
+            return prefill(rows, prompts, sp)
+
+        s.reset, s.prefilled_with, s.update, r.prefill = (timed_reset, timed_prefilled_with,
+                                                          timed_update, counted_prefill)
+        rec['tokens'] = lambda: sum(len(g) for g in sched.generated.values())
+        return rec
+
+    # older code: PagedScheduler with _reset / _record_tokens / _prefill hooks
+    reset, record = sched._reset, sched._record_tokens
+
+    def timed_reset():
+        reset(); start()
+        sched.generated_cpu = rec['clock'] = FirstTokenClock(rec['t0'], rec['ttft'])
+
+    def timed_record():
+        record(); step_done()
 
     sched._reset, sched._record_tokens = timed_reset, timed_record
     if hasattr(sched, '_prefill'):
@@ -74,6 +110,7 @@ def instrument(sched):
             rec['prefills'].append(sum(len(p) for p in prompts))
             return prefill(rows, prompts, sampler)
         sched._prefill = counted_prefill
+    rec['tokens'] = lambda: sum(len(g) for g in sched.generated_cpu.values())
     return rec
 
 
@@ -133,8 +170,8 @@ def main():
         sched.run(prompts, max_new_tokens=args.max_new)
         synchronize(device)
         seconds = time.perf_counter() - rec['t0']
-        tokens = sum(len(g) for g in sched.generated_cpu.values())
-        steps, ttft = [s * 1e3 for s in rec['steps']], [t * 1e3 for t in rec['clock'].ttft.values()]
+        tokens = rec['tokens']()
+        steps, ttft = [s * 1e3 for s in rec['steps']], [t * 1e3 for t in rec['ttft'].values()]
         r = dict(tokens_per_s=tokens / seconds, seconds=seconds,
                  ttft_ms=dict(p50=pct(ttft, .5), p95=pct(ttft, .95), max=max(ttft)),
                  step_ms=dict(p50=pct(steps, .5), p99=pct(steps, .99), max=max(steps),

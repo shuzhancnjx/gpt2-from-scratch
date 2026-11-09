@@ -98,9 +98,9 @@ class GraphCache:
 
 class BaseGraphs(ABC):
 
-    def __init__(self, sched):
-        assert str(sched.device).startswith('cuda'), f'{type(self).__name__} needs CUDA'
-        self.sched = sched
+    def __init__(self, runner):
+        assert str(runner.device).startswith('cuda'), f'{type(self).__name__} needs CUDA'
+        self.runner = runner                         # the ModelRunner: model, cache, buffers
         self.graphs = GraphCache(self._build)
 
     @abstractmethod
@@ -120,7 +120,7 @@ class BaseGraphs(ABC):
     def prepare(self, key):
         """Capture the graph for key if it is new. Each phase states when that is safe:
         prefill at any time (its warm-up runs on padding only); decode between runs, with
-        the scheduler reset around it (its warm-up runs the real step)."""
+        the runner reset around it (its warm-up runs the real step)."""
 
     def __len__(self):
         return len(self.graphs)

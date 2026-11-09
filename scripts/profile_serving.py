@@ -31,7 +31,7 @@ from torch.profiler import ProfilerActivity, profile, record_function
 
 from utils.device import default_dtype, pick_device, synchronize
 from model.gpt2.gpt import GPT, GPTConfig
-from inference.continuous_batch import PagedScheduler, Scheduler
+from inference.continuous_batch import PagedEngine, RowEngine
 
 MODELS = {
     '124m': dict(vocab_size=50304, n_layer=12, n_head=12, n_embd=768, block_size=1024),
@@ -46,7 +46,10 @@ def make_prompts(enc, n, lo, hi, seed):
 
 
 def instrument(sched, device):
-    """Wrap _admit/_decode/_retire with synchronised timers; return the totals dict."""
+    """Wrap each phase with synchronised timers; return the totals dict.
+
+    PagedEngine: admit = runner.prefill, decode = runner.decode, retire = scheduler.update.
+    RowEngine: its _admit, runner.decode, its _retire."""
     t = dict(admit=0.0, decode=0.0, retire=0.0, decode_steps=0)
 
     def wrap(name, fn):
@@ -62,8 +65,14 @@ def instrument(sched, device):
             return out
         return timed
 
-    for name in ('admit', 'decode', 'retire'):
-        setattr(sched, f'_{name}', wrap(name, getattr(sched, f'_{name}')))
+    if hasattr(sched, 'scheduler'):
+        hooks = [(sched.runner, 'prefill', 'admit'), (sched.runner, 'decode', 'decode'),
+                 (sched.scheduler, 'update', 'retire')]
+    else:
+        hooks = [(sched, '_admit', 'admit'), (sched.runner, 'decode', 'decode'),
+                 (sched, '_retire', 'retire')]
+    for obj, attr, name in hooks:
+        setattr(obj, attr, wrap(name, getattr(obj, attr)))
     return t
 
 
@@ -74,7 +83,7 @@ def breakdown(sched, prompts, max_new, device):
     sched.run(prompts, max_new_tokens=max_new)
     synchronize(device)
     wall = time.perf_counter() - t0
-    generated = sum(len(g) for g in sched.generated_cpu.values())
+    generated = sum(len(g) for g in sched.generated.values())
     return dict(wall=wall, tok_s=generated / wall, prefill_share=t['admit'] / wall,
                 decode_steps=t['decode_steps'],
                 ms_per_step=1e3 * t['decode'] / max(t['decode_steps'], 1))
@@ -114,10 +123,10 @@ def main():
     print(f'{"engine":18s} {"wall s":>7s} {"tok/s":>8s} {"prefill %":>10s} '
           f'{"decode steps":>13s} {"ms/step":>8s}')
     runs = [('row', args.row_slots,
-             lambda: Scheduler(model, enc, cfg, batch_size=args.row_slots, max_tokens=W,
+             lambda: RowEngine(model, enc, cfg, batch_size=args.row_slots, max_tokens=W,
                                device=device, dtype=dtype))]
     for m in (int(x) for x in args.max_seqs.split(',')):
-        runs.append((f'paged', m, lambda m=m: PagedScheduler(
+        runs.append((f'paged', m, lambda m=m: PagedEngine(
             model, enc, cfg, max_seqs=m, block_size=args.block_size, num_blocks=num_blocks,
             max_tokens=W, device=device, dtype=dtype)))
     for label, slots, build in runs:
@@ -129,7 +138,7 @@ def main():
 
     # -- Part B: which kernels dominate? ------------------------------------------
     m = int(args.max_seqs.split(',')[-1])
-    sched = PagedScheduler(model, enc, cfg, max_seqs=m, block_size=args.block_size,
+    sched = PagedEngine(model, enc, cfg, max_seqs=m, block_size=args.block_size,
                            num_blocks=num_blocks, max_tokens=W, device=device, dtype=dtype)
     sched.run(prompts[:2], max_new_tokens=2)
     instrument(sched, device)                                         # labels admit/decode in the trace

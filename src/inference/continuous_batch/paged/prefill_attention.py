@@ -67,7 +67,9 @@ def _prefill_attention_kernel(
             scores = tl.dot(q, tl.trans(k), input_precision='ieee')
         else:
             scores = tl.dot(q, tl.trans(k))
-        scores = scores * softmax_scale
+        # cast back to fp32: under torch.compile the scale arrives as fp64, which would
+        # turn the loop-carried running max into fp64 (Triton rejects a type change in a loop)
+        scores = (scores * softmax_scale).to(tl.float32)
         allowed = ((keys[None, :] >= starts[:, None]) & (keys[None, :] <= queries[:, None])
                    & is_key[None, :])
         scores = tl.where(allowed, scores, -float('inf'))

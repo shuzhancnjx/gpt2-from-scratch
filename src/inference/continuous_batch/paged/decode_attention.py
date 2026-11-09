@@ -44,7 +44,10 @@ def _decode_attention_kernel(
     dim_offsets = tl.arange(0, HEAD_SIZE) # number of dimensions within each head
     tile_offsets = tl.arange(0, TILE) # tokens per iteration (spanning TILE / BLOCK_SIZE blocks)
 
+    # the softmax scale is folded into the query once, in fp32: under torch.compile the scale
+    # arrives as fp64, and inside the loop it would turn the running max/sum into fp64
     query = tl.load(query_ptr + request * query_row_stride + head * query_head_stride + dim_offsets).to(tl.float32)
+    query = (query * soft_max_scale).to(tl.float32)
     new_key = tl.load(key_ptr + request * new_row_stride + head * new_head_stride + dim_offsets)
     new_value = tl.load(value_ptr + request * new_row_stride + head * new_head_stride + dim_offsets)
 
@@ -55,7 +58,7 @@ def _decode_attention_kernel(
     tl.store(value_pool_ptr + new_offsets, new_value)
 
     # 2. the softmax starts with the new token, from registers: max = its score, sum = 1
-    running_max = tl.sum(new_key.to(tl.float32) * query, axis=0) * soft_max_scale
+    running_max = tl.sum(new_key.to(tl.float32) * query, axis=0)
     running_denominator = 1.0
     running_numerator = new_value.to(tl.float32)
 
@@ -76,7 +79,7 @@ def _decode_attention_kernel(
 
         keys = tl.load(key_pool_ptr + element_offsets, mask=is_real_token[:, None], other=0.0).to(tl.float32)
 
-        scores = tl.sum(keys * query[None, :], axis=1) * soft_max_scale # (TILE,)
+        scores = tl.sum(keys * query[None, :], axis=1) # (TILE,), already scaled
         scores = tl.where(is_real_token, scores, -float('inf'))
 
         new_max = tl.maximum(running_max, tl.max(scores, axis=0))

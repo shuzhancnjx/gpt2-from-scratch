@@ -1,5 +1,5 @@
-"""The FastAPI app: the chat page's API, the OpenAI-compatible routes, and the Engine
-thread that is the scheduler's single writer."""
+"""The FastAPI app: the chat page's API, the OpenAI-compatible routes, and the
+RequestBatcher thread that is the inference engine's single writer."""
 
 import threading
 
@@ -83,8 +83,8 @@ def test_prompt_too_long_is_a_400(client):
     assert r.status_code == 400
 
 
-def test_only_the_engine_thread_touches_the_scheduler(client, llm, monkeypatch):
-    """Requests arrive on server threads; generate() must always run on 'engine'."""
+def test_only_the_batcher_thread_touches_the_engine(client, llm, monkeypatch):
+    """Requests arrive on server threads; generate() must always run on 'batcher'."""
     seen, original = set(), llm.engine.generate
 
     def spy(*a, **k):
@@ -97,12 +97,12 @@ def test_only_the_engine_thread_touches_the_scheduler(client, llm, monkeypatch):
                for i in range(4)]
     [t.start() for t in threads]
     [t.join() for t in threads]
-    assert seen == {'engine'}
+    assert seen == {'batcher'}
 
 
-def test_engine_groups_a_batch_by_sampling_params(llm):
+def test_batcher_groups_a_batch_by_sampling_params(llm):
     """Different settings in one gathered batch run as separate generate() calls."""
-    from app.chat_server import Engine
+    from app.chat_server import RequestBatcher
     calls = []
     original = llm.engine.generate
 
@@ -112,7 +112,7 @@ def test_engine_groups_a_batch_by_sampling_params(llm):
 
     llm.engine.generate = spy
     try:
-        e = Engine(llm, max_batch=8, gather_window=0.2)
+        e = RequestBatcher(llm, max_batch=8, gather_window=0.2)
         greedy, warm = SamplingParams(max_new_tokens=3), SamplingParams(max_new_tokens=3, temperature=0.9)
         futures = [e.submit('a', greedy), e.submit('b', warm), e.submit('c', greedy)]
         e.start()

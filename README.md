@@ -58,7 +58,7 @@ src/                       one top-level package per layer (no umbrella package)
           prefill_attention.py   prefill: FlashAttention over the packed prompts
   app/
     llm.py                 LLM: the front door -- load once, pick an engine, generate()
-    chat_server.py         FastAPI: chat page + OpenAI-compatible /v1 API, one engine thread
+    chat_server.py         FastAPI: chat page + OpenAI-compatible /v1 API, one batcher thread
     chat.html              the chat page
 scripts/        prepare_data, train*, plot_loss, eval_checkpoint,
                 sample, chat_server, bench_paging, profile_serving
@@ -252,9 +252,9 @@ curl -s localhost:8765/v1/completions -H 'Content-Type: application/json' \
      -d '{"prompt": "The capital of France is", "max_tokens": 16, "temperature": 0}'
 ```
 
-FastAPI handles requests concurrently, but only one engine thread ever touches the
-scheduler: endpoints queue a job and await its result, and the engine runs requests that
-arrive together as one batch (grouped by sampling settings).
+FastAPI handles requests concurrently, but only one thread, the `RequestBatcher`, ever
+touches the inference engine: endpoints queue a job and await its result, and the batcher
+runs requests that arrive together as one batch (grouped by sampling settings).
 
 How a request moves through a server in general (scheduling, paging, prefix caching)
 is in `docs/request-lifecycle.md`; one forward pass on the GPU, kernel by kernel, is in

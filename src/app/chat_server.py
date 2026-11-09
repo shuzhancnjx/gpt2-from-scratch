@@ -14,9 +14,9 @@ Routes:
     GET  /docs                  interactive API docs (FastAPI)
 
 One writer. FastAPI serves every request concurrently (async), but only ONE thread --
-the Engine -- ever touches the scheduler, its block pool and its CUDA graphs
-(request-lifecycle.md §20). An endpoint hands a job to the Engine through a queue and
-awaits a future; the Engine gathers jobs that arrive close together, groups them by
+the RequestBatcher -- ever touches the inference engine, its block pool and its CUDA
+graphs (request-lifecycle.md §20). An endpoint hands a job to the batcher through a queue
+and awaits a future; the batcher gathers jobs that arrive close together, groups them by
 SamplingParams (a batch shares one sampler -- and one captured graph), and runs one
 generate() per group.
 
@@ -86,12 +86,15 @@ def cut(text, stops):
     return (text[:min(hits)], True) if hits else (text, False)
 
 
-# -- the Engine thread: the single writer ------------------------------------------------
+# -- the RequestBatcher thread: the single writer ----------------------------------------
 
-class Engine(threading.Thread):
+class RequestBatcher(threading.Thread):
+    """Gathers requests into batches and runs them on the inference engine (llm.engine),
+    from this one thread only. Not an engine itself: it decides WHICH requests run
+    together; the engine decides how a batch runs."""
 
     def __init__(self, llm, max_batch, gather_window=0.03):
-        super().__init__(daemon=True, name='engine')
+        super().__init__(daemon=True, name='batcher')
         self.llm = llm
         self.max_batch, self.gather_window = max_batch, gather_window
         self.inbox = queue.Queue()
@@ -191,24 +194,24 @@ def create_app(llm, sampling_params=None, history_turns=0, gather_window=0.03, i
     64 new tokens). The /v1 routes take theirs from each request."""
     sampling_params = sampling_params or SamplingParams(max_new_tokens=64, temperature=0.8, top_k=40)
     max_batch = getattr(llm.engine, 'max_seqs', 8)           # the static engine has none
-    engine = Engine(llm, max_batch=max_batch, gather_window=gather_window)
+    batcher = RequestBatcher(llm, max_batch=max_batch, gather_window=gather_window)
     enc, context = llm.enc, llm.config.block_size
     name = (info or {}).get('checkpoint', 'gpt2')
 
     @asynccontextmanager
     async def lifespan(app):
-        engine.start()
-        log.info('engine thread started (%s, up to %d requests per batch)', llm, max_batch)
+        batcher.start()
+        log.info('batcher thread started (%s, up to %d requests per batch)', llm, max_batch)
         yield
 
     app = FastAPI(title='GPT-2 from scratch', lifespan=lifespan)
-    app.state.engine = engine
+    app.state.batcher = batcher
 
     async def generate(prompt, p):
         if len(enc.encode(prompt)) + p.max_new_tokens > context:
             raise HTTPException(400, f'prompt + max_tokens exceeds the {context}-token context')
         try:
-            return await asyncio.wrap_future(engine.submit(prompt, p))
+            return await asyncio.wrap_future(batcher.submit(prompt, p))
         except ValueError as e:
             raise HTTPException(400, str(e))
         except Exception as e:
@@ -233,7 +236,7 @@ def create_app(llm, sampling_params=None, history_turns=0, gather_window=0.03, i
     async def api_info():
         return dict(info or {}, device=llm.device, engine=llm.engine_name,
                     max_seqs=max_batch, temperature=sampling_params.temperature,
-                    max_new=sampling_params.max_new_tokens, history_turns=history_turns, runs=engine.runs)
+                    max_new=sampling_params.max_new_tokens, history_turns=history_turns, runs=batcher.runs)
 
     @app.post('/api/chat')
     async def api_chat(req: UIChatRequest):
@@ -253,7 +256,7 @@ def create_app(llm, sampling_params=None, history_turns=0, gather_window=0.03, i
     async def completions(req: CompletionRequest):
         prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
         p = settings(req)
-        outs = await asyncio.gather(*(generate(x, p) for x in prompts))   # batched by the Engine
+        outs = await asyncio.gather(*(generate(x, p) for x in prompts))   # batched by the RequestBatcher
         choices, n_prompt, n_gen = [], 0, 0
         for i, (x, out) in enumerate(zip(prompts, outs)):
             text, stopped = cut(out['text'], _stops(req.stop))

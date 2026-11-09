@@ -8,7 +8,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 if TYPE_CHECKING:                       # names the cache contract; no import at run time
-    from inference.base_kv_cache import BaseKVCache, PrefillBatch
+    from inference.base_kv_cache import BaseKVCache
+    from inference.prefill_batch import PrefillBatch
 
 
 @dataclass

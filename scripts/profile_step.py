@@ -37,7 +37,7 @@ import torch
 from torch.autograd import DeviceType
 from torch.profiler import ProfilerActivity, profile
 
-from inference.base_kv_cache import PrefillBatch
+from inference.prefill_batch import PrefillBatch
 from inference.continuous_batch import PagedEngine
 from inference.sampling import SamplingParams
 from model.gpt2 import GPT, GPTConfig

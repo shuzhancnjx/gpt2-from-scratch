@@ -11,7 +11,7 @@ MacBook Pro and an A100.
 src/                       one top-level package per layer (no umbrella package)
   model/
     gpt2/                  GPT-2; a second model would sit beside it
-      gpt.py               GPTConfig, attention / MLP / blocks, GPT, generate()
+      gpt.py               GPTConfig, attention / MLP / blocks, GPT
       loading.py           load_model(): a checkpoint, 'gpt2' (OpenAI weights), or a config
   tokenizer/
     tokenizer.py           byte-pair encoding: BPETokenizer + BPETrainer
@@ -29,7 +29,10 @@ src/                       one top-level package per layer (no umbrella package)
   inference/
     base_engine.py         BaseEngine: generate(prompts, SamplingParams), every engine
     base_kv_cache.py       BaseKVCache: the contract every KV cache implements
+    prefill_batch.py       PrefillBatch: packed prompts' metadata (model, caches, runner, graphs)
+    cuda_graph.py          CapturedGraph, GraphCache, BaseGraphs: every captured step
     sampling.py            greedy, temperature / top-k / top-p, SamplingParams (graph safe)
+    uncached.py            generate_uncached: no KV cache (training samples, the reference)
     static_batch/          one fixed batch, start to finish
       kv_cache.py            KVCache: one write pointer for the whole batch
       decode_step.py         the decode step captured in a CUDA graph

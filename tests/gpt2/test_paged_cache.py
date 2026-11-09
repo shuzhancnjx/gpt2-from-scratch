@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from model.gpt2.gpt import GPTConfig
-from inference.base_kv_cache import PrefillBatch
+from inference.prefill_batch import PrefillBatch
 from inference.continuous_batch import RowKVCache
 from inference.continuous_batch.paged.block.block_allocator import SCRATCH
 from inference.continuous_batch.paged.paged_cache import PagedKVCache

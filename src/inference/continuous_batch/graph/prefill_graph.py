@@ -15,7 +15,7 @@ The indices themselves are built on the CPU in a pinned buffer and moved with on
 copy per prefill (_buffers, run).
 """
 import torch 
-from inference.base_kv_cache import PrefillBatch
+from inference.prefill_batch import PrefillBatch
 from inference.cuda_graph import BaseGraphs
 
 # Small buckets: prefill graphs pay off on small, launch-bound prefills (the token budget

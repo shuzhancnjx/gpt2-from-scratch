@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from model.gpt2.gpt import GPTConfig
-from inference.base_kv_cache import PrefillBatch
+from inference.prefill_batch import PrefillBatch
 from inference.continuous_batch import RowKVCache
 
 TINY = dict(vocab_size=64, n_layer=2, n_head=2, n_embd=32, block_size=32,

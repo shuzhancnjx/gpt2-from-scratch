@@ -23,7 +23,7 @@ Nothing here reads the GPU back to the CPU: the engine does the one copy per ste
 import torch
 import torch._dynamo
 
-from inference.base_kv_cache import PrefillBatch
+from inference.prefill_batch import PrefillBatch
 from inference.continuous_batch.graph.decode_graph import DecodeGraphs
 from inference.continuous_batch.graph.prefill_graph import PrefillGraphs
 

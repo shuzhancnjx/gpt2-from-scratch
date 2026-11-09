@@ -48,7 +48,9 @@ class PagedEngine(ContinuousEngine):
         watermark           blocks kept free while other requests hold blocks
         device, dtype       where the pool lives and its precision
         cuda_graph          CUDA graphs for prefill (one per token bucket) and decode (one
-                            per sampler setting), captured before each run (CUDA only)
+                            per sampler setting) of the model under torch.compile, compiled
+                            and captured before the first run (CUDA only; ~1 min the first
+                            time, then Inductor's on-disk cache)
         prefilled_rows      capacity of the prefilled buffer (>= 1, default max_seqs)
         max_prefill_tokens  prompt tokens one step may prefill. 'auto' (default): 1024 with
                             CUDA graphs (A100: vs no cap, +1% tok/s, -8% TTFT, worst step

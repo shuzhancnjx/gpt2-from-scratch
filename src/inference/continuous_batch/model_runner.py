@@ -7,6 +7,8 @@ model touches each step:
     the model and the cache
     next_token_gpu (B, 1), active_gpu (B,)      the decode rows' inputs
     PrefillGraphs / DecodeGraphs                 CUDA graphs (paged cache, cuda_graph=True, CUDA)
+    graph_model                                  what the graphs record: the model under
+                                                 torch.compile (Inductor) when graphs are on
 
 and offers the steps an engine calls, all in terms of cache rows:
 
@@ -32,8 +34,9 @@ class ModelRunner:
         """
         cache                the engine's KV cache; decode rows are its rows [0, max_seqs)
         max_tokens           W, the cache width the decode mask spans
-        cuda_graph           capture prefill + decode as CUDA graphs (needs CUDA and a
-                             PagedKVCache: the prefill graphs pad into its pad_row)
+        cuda_graph           capture prefill + decode as CUDA graphs of the COMPILED model
+                             (needs CUDA and a PagedKVCache: the prefill graphs pad into its
+                             pad_row)
         max_prefill_prompts  most prompts one prefill packs (the prefill graphs' width)
         """
         self.model, self.enc, self.cache = model, enc, cache
@@ -44,6 +47,14 @@ class ModelRunner:
         self.active_gpu = torch.zeros(self.B, dtype=torch.bool, device=device)
 
         use_graphs = cuda_graph and str(device).startswith('cuda')
+        # The graphs record the model under torch.compile: Inductor fuses the work around
+        # attention -- each residual add into the next LayerNorm, GELU, the cache's index
+        # math -- and the graph replays the fused kernels (A100, 16 rows: decode replay
+        # 1.085 -> 0.788 ms, 148 -> 113 kernels; prefill 2.10 -> 1.71 ms). dynamic=False: every
+        # graph shape (decode, each prefill bucket) gets its own specialised compile, done
+        # in start() like the capture. The eager prefill fallback (a batch bigger than any
+        # bucket) keeps the plain model: its shapes vary, and each would recompile.
+        self.graph_model = torch.compile(model, dynamic=False) if use_graphs else model
         self.decode_graphs = DecodeGraphs(self) if use_graphs else None
         self.prefill_graphs = PrefillGraphs(self) if use_graphs else None
 
@@ -76,14 +87,16 @@ class ModelRunner:
         batch = PrefillBatch.build(rows, [len(p) for p in prompts], self.device)
         idx = torch.tensor([t for p in prompts for t in p], dtype=torch.long,
                            device=self.device).unsqueeze(0)                 # (1, sum(lens))
-        logits = self.prefill_logits(idx, batch)                           # (1, n, vocab)
+        logits = self.prefill_logits(idx, batch, self.model)    # any shape: the plain model
         return sampling_params.sampler()(logits[0, :, :self.enc.n_vocab])  # (n, 1)
 
-    def prefill_logits(self, idx, batch):
+    def prefill_logits(self, idx, batch, model=None):
         """The packed prefill's model call: logits at each prompt's last token (1, n, vocab).
-        Tensors in, tensors out -- PrefillGraphs records exactly this as its body."""
-        logits, _ = self.model(idx, kv_cache=self.cache, pos_ids=batch.positions.unsqueeze(0),
-                               prefill=batch)
+        Tensors in, tensors out -- PrefillGraphs records exactly this as its body, with the
+        graph model (compiled); the eager fallback passes the plain model."""
+        model = self.graph_model if model is None else model
+        logits, _ = model(idx, kv_cache=self.cache, pos_ids=batch.positions.unsqueeze(0),
+                          prefill=batch)
         return logits
 
     # -- decode -----------------------------------------------------------------------
@@ -109,11 +122,12 @@ class ModelRunner:
 
     def decode_eager(self, sampling_params):
         """The decode step itself: model on the buffers, sample, tokens INTO next_token_gpu.
-        Tensor ops only -- DecodeGraphs records exactly this as its body."""
+        Tensor ops only -- DecodeGraphs records exactly this as its body (with graphs on,
+        graph_model is the compiled model; without, the plain one)."""
         attn_mask = self.mask() if self.cache.needs_mask else None     # a kernel needs none
-        logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
-                               pos_ids=self.cache.seq_len().unsqueeze(1),
-                               attn_mask=attn_mask, cache_active=self.active_gpu)
+        logits, _ = self.graph_model(self.next_token_gpu, kv_cache=self.cache,
+                                     pos_ids=self.cache.seq_len().unsqueeze(1),
+                                     attn_mask=attn_mask, cache_active=self.active_gpu)
         sampler = sampling_params.sampler()
         return self.next_token_gpu.copy_(sampler(logits[:, -1, :self.enc.n_vocab]))
 

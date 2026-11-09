@@ -3,7 +3,6 @@
     python scripts/profile_step.py                         # 124M, CUDA, 16 decode rows
     python scripts/profile_step.py --max-seqs 64           # a wider decode batch
     python scripts/profile_step.py --trace-dir results/traces   # + Chrome traces (Perfetto)
-    python scripts/profile_step.py --compile default       # the model under torch.compile
 
 bench_admission / bench_paging time whole steps; this one opens them up. Three parts:
 
@@ -15,12 +14,9 @@ bench_admission / bench_paging time whole steps; this one opens them up. Three p
   3. prefill          one packed prefill of --prefill-tokens tokens: kernels by category
                       (eager), then graph replay time and the bucket padding it pays
 
---compile MODE wraps the model in torch.compile (Inductor; MODE = default or
-max-autotune-no-cudagraphs -- the engine captures its own CUDA graphs) before anything
-runs, so the same three parts show what fusion does: fewer, fused kernels
-(triton_poi_fused_add_native_layer_norm_...), the replay time, and how many graph breaks
-Dynamo hit around the cache code and the Triton attention kernels. An experiment: the
-engine itself is unchanged.
+On CUDA the engine runs the model under torch.compile (its graphs record the compiled
+model), so the kernel tables show Inductor's fused kernels
+(triton_per_fused_add_native_layer_norm_...), and the end reports Dynamo's graph breaks.
 
 The engine is filled the normal way (prompts admitted until every decode row is busy)
 and nothing finishes while it is measured, so every decode step is a full-batch step.
@@ -193,8 +189,6 @@ def main():
     p.add_argument('--reps', type=int, default=20, help='calls per measurement')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--trace-dir', default=None)
-    p.add_argument('--compile', default=None, metavar='MODE',
-                   help='torch.compile the model first: default | max-autotune-no-cudagraphs')
     p.add_argument('--out', default=None)
     args = p.parse_args()
 
@@ -215,13 +209,11 @@ def main():
     engine = PagedEngine(model, enc, cfg, max_seqs=B, block_size=16, device=device,
                          dtype=dtype, cuda_graph=cuda)
     runner, sched = engine.runner, engine.scheduler
-    if args.compile:                    # before any graph is captured: capture records the compiled kernels
-        runner.model = torch.compile(model, mode=None if args.compile == 'default' else args.compile)
     sp = SamplingParams(max_new_tokens=W - args.context - 16)      # nothing finishes
     prompt_ids = [[rng.randrange(50000) for _ in range(args.context)] for _ in range(B)]
     print(f'device {device}  model {args.model}  dtype {dtype}  decode rows {B}  '
           f'context ~{args.context}  graphs {runner.decode_graphs is not None}  '
-          f'compile {args.compile}')
+          f'compiled {runner.graph_model is not model}')
     t_start = time.perf_counter()
     out = dict(args=vars(args), device=device)
 
@@ -300,7 +292,7 @@ def main():
                 out['prefill_graph'] = dict(bucket=bucket, real_tokens=sum(lens),
                                             replay_ms=only, run_ms=full)
 
-    if args.compile:
+    if runner.graph_model is not model:
         from torch._dynamo.utils import counters
         breaks = dict(counters['graph_break'])
         print(f'\ncompile: {sum(breaks.values())} graph breaks'

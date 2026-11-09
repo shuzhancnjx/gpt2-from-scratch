@@ -1,6 +1,6 @@
 """Steps b and c of P1.4: the paged cache's write path and gather path.
 
-Like test_serving.py these drive the cache directly, not through a model: the
+Like test_row_cache.py these drive the cache directly, not through a model: the
 properties under test -- every token lands at its slot, gathering reproduces what
 RowKVCache would hold, idle rows touch only scratch -- are exact facts about the
 buffers, much easier to assert there than to infer from generated text.

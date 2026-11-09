@@ -8,13 +8,11 @@ replays all of them with one launch. A graph needs fixed shapes, so:
     padding  padding tokens use the cache's pad row (all SCRATCH): they write only the
              scratch block and attend one scratch slot -- their output is never read
 
-Real tokens are computed exactly as in the eager prefill: each one reads only its own
-request's blocks, up to its own position, through the Triton kernel.
+Real tokens are computed exactly as in the eager prefill: each attends only within its
+own prompt (prefill_attention.py) and writes its k/v into its own request's blocks.
 
-Needs from the rest of the engine (to add alongside this file):
-  - PagedKVCache.pad_row: one extra block-table row that is always SCRATCH
-  - PagedEngine._prefill: try PrefillGraphs.run first; None -> the eager forward
-  - PagedEngine: build PrefillGraphs when the decode graph is captured (CUDA)
+The indices themselves are built on the CPU in a pinned buffer and moved with one async
+copy per prefill (_buffers, run).
 """
 import torch 
 from inference.base_kv_cache import PrefillBatch
@@ -48,31 +46,33 @@ class PrefillGraphs(BaseGraphs):
         return next((T for T in self.buckets if T >= total_tokens), None)
 
     def _buffers(self, T):
-        """The fixed tensors bucket T's graph reads, all on the device:
+        """The fixed tensors bucket T's graph reads, all views of ONE device tensor `flat`:
 
             idx        (1, T)  packed token ids (padding: 0)
-            batch      a PrefillBatch whose tensors are fixed buffers:
-                         slots_gpu (N,)  lens_gpu (N,)  last (N,)
-                         rows (T,)       positions (T,)
-                       start as padding: rows / slots_gpu = cache.pad_row, positions /
-                       lens_gpu / last = 0. Its CPU lists (slots, lens) are dummies --
-                       the kernel path reads only the tensors.
-        Returns them as a dict.
+            batch      a PrefillBatch whose tensors are views of flat:
+                         rows (T,)   positions (T,)   slots_gpu (N,)  lens_gpu (N,)  last (N,)
+                       padding: rows / slots_gpu = cache.pad_row, the rest 0. Its CPU
+                       lists (slots, lens) are dummies -- the kernels read only tensors.
+            flat       the device tensor: [idx | rows | positions | slots | lens | last]
+            staging    flat's pinned host twin: run() builds a batch's indices there and
+                       moves them with ONE async copy (not ~25 small kernels + 3 blocking
+                       copies, ~0.8 ms per prefill on the A100)
+            copied     an event after that copy: staging is not rewritten before it lands
         """
-
         cache, device, N = self.runner.cache, self.runner.device, self.runner.max_prefill_prompts
-        pad = cache.pad_row 
+        pad = cache.pad_row
 
-        long = dict(dtype=torch.long, device=device)
+        flat = torch.zeros(3 * T + 3 * N, dtype=torch.long, device=device)
+        idx, rows, positions, slots_gpu, lens_gpu, last = flat.split([T, T, T, N, N, N])
+        rows.fill_(pad)
+        slots_gpu.fill_(pad)
         return dict(
-            idx=torch.zeros(1, T, **long), 
-            batch=PrefillBatch(
-                slots=[pad] * N, lens=[0] * N,
-                slots_gpu=torch.full((N,), pad, **long),
-                lens_gpu=torch.zeros(N, **long),
-                rows=torch.full((T,), pad, **long),
-                positions=torch.zeros(T, **long), 
-                last=torch.zeros(N, **long)))
+            idx=idx.view(1, T),
+            batch=PrefillBatch(slots=[pad] * N, lens=[0] * N, slots_gpu=slots_gpu,
+                               lens_gpu=lens_gpu, rows=rows, positions=positions, last=last),
+            flat=flat,
+            staging=torch.empty(flat.shape, dtype=torch.long, pin_memory=True),
+            copied=torch.cuda.Event())
 
     def _build(self, T):
         """GraphCache's build(): make bucket T's buffers (kept in self._bufs[T], filled by
@@ -102,18 +102,24 @@ class PrefillGraphs(BaseGraphs):
         self.prepare(T)                               # capture if new (padding-only warm-up)
         graph = self.graphs.get(T)
 
-        buf, pad = self._bufs[T], self.runner.cache.pad_row
-        real = PrefillBatch.build(slots, lens, self.runner.device)
-        b = buf['batch']
+        buf, pad, N = self._bufs[T], self.runner.cache.pad_row, self.runner.max_prefill_prompts
 
-        ids = torch.tensor([t for p in prompts for t in p], dtype=torch.long, device=self.runner.device)
-        buf['idx'][0, :total].copy_(ids);          buf['idx'][0, total:].zero_()
-        b.rows[:total].copy_(real.rows);           b.rows[total:].fill_(pad)
-        b.positions[:total].copy_(real.positions); b.positions[total:].zero_()
-        b.slots_gpu[:n].copy_(real.slots_gpu);      b.slots_gpu[n:].fill_(pad)
-        b.lens_gpu[:n].copy_(real.lens_gpu);       b.lens_gpu[n:].zero_()
-        b.last[:n].copy_(real.last);               b.last[n:].zero_() 
+        # build every index on the CPU, in the pinned staging buffer (padding included) ...
+        buf['copied'].synchronize()                   # the previous batch's copy has landed
+        idx, rows, positions, slots_cpu, lens_cpu, last = buf['staging'].split([T, T, T, N, N, N])
+        lens_t, slots_t = torch.tensor(lens), torch.tensor(slots)
+        starts = torch.cumsum(lens_t, 0) - lens_t                       # where each prompt begins
+        idx[:total] = torch.tensor([t for p in prompts for t in p]);   idx[total:] = 0
+        rows[:total] = torch.repeat_interleave(slots_t, lens_t);       rows[total:] = pad
+        positions[:total] = torch.arange(total) - torch.repeat_interleave(starts, lens_t)
+        positions[total:] = 0
+        slots_cpu[:n] = slots_t;                 slots_cpu[n:] = pad
+        lens_cpu[:n] = lens_t;                   lens_cpu[n:] = 0
+        last[:n] = starts + lens_t - 1;          last[n:] = 0
 
+        # ... then one async host -> device copy into the graph's buffers, and replay
+        buf['flat'].copy_(buf['staging'], non_blocking=True)
+        buf['copied'].record()
         logits = graph.replay()[0, :n]                            # (n, vocab): real prompts
         return sampling_params.sampler()(logits[:, :self.runner.enc.n_vocab])     # (n, 1)
     

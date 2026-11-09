@@ -166,18 +166,21 @@ class PagedKVCache(BaseKVCache):
     def decode_attend(self, layer_idx, query, key, value, attn_mask):
         """Store the new k/v, then attend over each row's history.
 
-        CUDA: the kernel reads each row's real blocks in place (seq_len = pos + 1) -- no
-        gather, no mask. Elsewhere: gather to W and masked SDPA.
-        Idle rows sit at pos 0 on the scratch block: they attend one scratch slot, finite,
-        and their output is unused.
+        CUDA: ONE kernel does both -- stores the new k/v at the slots begin_forward
+        computed, then reads each row's real blocks in place (seq_len = pos + 1): no
+        index_copy_, no gather, no mask. Elsewhere: write, gather to W, masked SDPA.
+        Idle rows sit at pos 0 on the scratch block: they write and attend one scratch
+        slot, finite, and their output is unused.
         """
         B = key.size(0)
-        self.write(layer_idx, key, value)
         if not self.use_kernel:
+            self.write(layer_idx, key, value)
             return self.sdpa_decode(layer_idx, query, attn_mask)
         from inference.continuous_batch.paged.decode_attention import decode_attention
-        out = decode_attention(query[:, :, 0], self.key[layer_idx], self.value[layer_idx],
-                              self.block_table_gpu[:B], self._decode_seq_lens[:B])
+        out = decode_attention(query[:, :, 0], key[:, :, 0], value[:, :, 0],      # the kernel
+                               self.key[layer_idx], self.value[layer_idx],        # also writes
+                               self.block_table_gpu[:B], self._decode_seq_lens[:B],
+                               self._slots[:B])
         return out.unsqueeze(2)
 
     def _flat(self, pool):

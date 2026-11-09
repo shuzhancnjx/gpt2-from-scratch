@@ -14,6 +14,8 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from inference.sampling import make_sampler
+from inference.uncached import generate_uncached
 from utils.data import DataLoaderLite
 from model.gpt2.gpt import GPT, GPTConfig
 from utils.log import DEFAULT_RUN_DIR, Logger, load_checkpoint
@@ -261,8 +263,8 @@ def _sample(raw_model, enc, cfg: TrainConfig, runtime: Runtime):
     and DDP should not be driven outside the training step."""
     tokens = torch.tensor(enc.encode(cfg.sample_prompt), dtype=torch.long)
     idx = tokens.unsqueeze(0).repeat(cfg.sample_sequences, 1).to(runtime.device)
-    out = raw_model.generate(idx, max_new_tokens=cfg.sample_length - idx.size(1),
-                             vocab_limit=cfg.tokenizer_vocab)
+    out = generate_uncached(raw_model, idx, cfg.sample_length - idx.size(1),
+                            make_sampler(temperature=1.0, top_k=50), vocab_limit=cfg.tokenizer_vocab)
     for row in out:
         print('>', enc.decode(row.tolist()))
 

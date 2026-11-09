@@ -17,6 +17,8 @@ from pathlib import Path
 
 import torch
 
+from inference.sampling import greedy
+from inference.uncached import generate_uncached
 from inference.static_batch.inference import GptInference
 
 # Anchored to the repo, not the working directory, so the script runs from anywhere.
@@ -25,17 +27,15 @@ DEFAULT_CKPT = REPO_ROOT / 'runs/keep/gpt2_124M_step013147.pt'
 
 
 def greedy_uncached(inf, prompt, max_new_tokens):
-    """The slow path: no cache, recompute the entire prefix at every step."""
+    """The slow path: no cache, recompute the entire prefix at every step (greedy, up to
+    and including the first <|endoftext|>)."""
     ids = inf.enc.encode(prompt)
+    idx = torch.tensor([ids], dtype=torch.long, device=inf.device)
     with torch.inference_mode():
-        for _ in range(max_new_tokens):
-            idx = torch.tensor([ids], dtype=torch.long, device=inf.device)
-            logits, _ = inf.model(idx[:, -inf.config.block_size:])
-            nxt = int(logits[0, -1, :inf.enc.n_vocab].argmax())
-            ids.append(nxt)
-            if nxt == inf.enc.eot_token:
-                break
-    return ids
+        out = generate_uncached(inf.model, idx, max_new_tokens, greedy,
+                                vocab_limit=inf.enc.n_vocab)[0, len(ids):].tolist()
+    eot = inf.enc.eot_token
+    return ids + (out[:out.index(eot) + 1] if eot in out else out)
 
 
 def check(inf, prompts, max_new_tokens):

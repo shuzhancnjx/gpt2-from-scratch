@@ -51,32 +51,3 @@ def test_optimizer_splits_decay_by_dimension(tiny_model):
     # matrices decay, biases and LayerNorm gains do not
     assert all(p.dim() >= 2 for p in decay['params'])
     assert all(p.dim() < 2 for p in no_decay['params'])
-
-
-def test_generate_extends_sequence(tiny_model, tiny_config):
-    idx = torch.zeros((2, 4), dtype=torch.long)
-    out = tiny_model.generate(idx, max_new_tokens=6, top_k=8)
-    assert out.shape == (2, 10)
-    assert torch.equal(out[:, :4], idx)      # prefix preserved
-
-
-def test_generate_respects_vocab_limit(tiny_config):
-    """The head is padded past the tokenizer's real vocab; those rows must not
-    be sampled or the decode raises."""
-    torch.manual_seed(0)
-    model = GPT(tiny_config)
-    limit = 10
-    out = model.generate(torch.zeros((4, 2), dtype=torch.long),
-                         max_new_tokens=12, top_k=5, vocab_limit=limit)
-    assert out[:, 2:].max().item() < limit
-
-
-def test_generate_restores_training_mode(tiny_model):
-    tiny_model.train()
-    tiny_model.generate(torch.zeros((1, 2), dtype=torch.long), max_new_tokens=2)
-    assert tiny_model.training
-
-
-def test_generate_does_not_build_a_graph(tiny_model):
-    out = tiny_model.generate(torch.zeros((1, 2), dtype=torch.long), max_new_tokens=2)
-    assert not out.requires_grad

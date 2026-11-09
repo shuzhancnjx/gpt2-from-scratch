@@ -177,33 +177,6 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(B * T, logits.size(-1)), targets.view(B * T))
         return logits, loss
 
-    @torch.no_grad()
-    def generate(self, idx, max_new_tokens, top_k=50, vocab_limit=None):
-        """Sample max_new_tokens continuations of idx (B, T) -> (B, T + max_new_tokens).
-
-        vocab_limit truncates the logits: the head is usually padded past the
-        tokenizer's real vocab, and those extra rows are not decodable.
-
-        No KV cache yet -- this re-runs the full prefix each step, which is fine for
-        short samples during training. The cached path lands in inference/static_batch/.
-        """
-        was_training = self.training
-        self.eval()
-
-        for _ in range(max_new_tokens):
-            window = idx[:, -self.config.block_size:]
-            logits, _ = self(window)
-            logits = logits[:, -1, :vocab_limit] if vocab_limit else logits[:, -1, :]
-
-            probs = F.softmax(logits, dim=-1)
-            topk_probs, topk_pos = torch.topk(probs, top_k, dim=-1)
-            choice = torch.multinomial(topk_probs, num_samples=1)
-            idx = torch.cat([idx, torch.gather(topk_pos, -1, choice)], dim=1)
-
-        if was_training:
-            self.train()
-        return idx
-
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
 

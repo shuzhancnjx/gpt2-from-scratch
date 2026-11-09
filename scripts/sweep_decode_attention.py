@@ -74,12 +74,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--rows', type=int, nargs='+', default=[1, 16, 64])
     p.add_argument('--ctx', type=int, nargs='+', default=[256, 1024, 4096])
-    p.add_argument('--tiles', type=int, nargs='+', default=[16, 32, 64, 128])
+    p.add_argument('--tiles', type=int, nargs='+', default=[16, 32, 64, 128, 256])
     args = p.parse_args()
 
     torch.manual_seed(0)
     bw = copy_bandwidth()
-    print(f'{torch.cuda.get_device_name()}: copy bandwidth {bw / 1e3:.2f} TB/s '
+    print(f'{torch.cuda.get_device_name()}: copy bandwidth {bw / 1e6:.2f} TB/s '
           f'(the floor below is KV bytes / this)\n')
     tile_cols = ''.join(f'{f"tile {t}":>17s}' for t in args.tiles)
     print(f'{"rows":>5s} {"ctx":>5s} {"programs":>8s} {"KV MB":>7s} {"floor us":>8s}{tile_cols}')

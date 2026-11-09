@@ -5,8 +5,11 @@ One program per (row, head); row r attends over the first seq_lens[r] tokens of 
 sequence its block-table row describes.
 
     decode   one row per request: its new token, seq_len = pos + 1
-    prefill  one row per PROMPT TOKEN: token t of a prompt uses its request's block
-             table and seq_len = t + 1 -- causal attention, every prompt in one launch
+
+It served prefill too, one row per prompt token (seq_len = t + 1), until the profile
+showed that is the wrong shape for prefill -- one query per program, no tensor cores, a
+prompt's K/V re-read by each of its tokens. Prefill now has its own FlashAttention-style
+kernel over the packed prompts (prefill_attention.py).
 
 Triton needs an NVIDIA GPU: this module imports on Colab, not on the Mac.
 """
@@ -19,7 +22,8 @@ import triton.language as tl
 @triton.jit
 def _paged_attention_kernel(
     query_ptr, key_pool_ptr, value_pool_ptr, block_table_ptr, seq_lens_ptr, output_ptr, 
-    query_row_stride,  query_head_stride, pool_block_stride, pool_token_stride,  pool_head_stride, table_row_stride, 
+    query_row_stride,  query_head_stride, output_row_stride, output_head_stride,
+    pool_block_stride, pool_token_stride,  pool_head_stride, table_row_stride, 
     soft_max_scale, 
     BLOCK_SIZE: tl.constexpr, 
     HEAD_SIZE: tl.constexpr, 
@@ -67,12 +71,13 @@ def _paged_attention_kernel(
         running_max = new_max
 
     attention_output = running_numerator / running_denominator
-    tl.store(output_ptr + request * query_row_stride + head * query_head_stride + dim_offsets, 
+    tl.store(output_ptr + request * output_row_stride + head * output_head_stride + dim_offsets, 
                 attention_output.to(output_ptr.dtype.element_ty))
 
 def paged_attention(query, key_pool, value_pool, block_table, seq_lens):
     """
-    query        (B, H, D)                       one query per row
+    query        (B, H, D)                       one query per row; any strides with a
+                                                 unit last dim (read in place, no copy)
     key_pool     (num_blocks, block_size, H, D)  PagedKVCache.key[layer]
     value_pool   (num_blocks, block_size, H, D)  PagedKVCache.value[layer]
     block_table  (B, max_blocks), int            logical -> physical block per row
@@ -80,7 +85,7 @@ def paged_attention(query, key_pool, value_pool, block_table, seq_lens):
     returns      (B, H, D)
     """
 
-    query = query.contiguous() 
+    assert query.stride(-1) == 1, 'the head dim must be contiguous'
 
     num_requests, num_head, head_dim = query.shape
 
@@ -88,12 +93,14 @@ def paged_attention(query, key_pool, value_pool, block_table, seq_lens):
 
     assert key_pool.stride() == value_pool.stride() and key_pool.stride(-1) == 1
 
-    output = torch.empty_like(query)
+    output = torch.empty(query.shape, dtype=query.dtype, device=query.device)   # contiguous
 
     _paged_attention_kernel[(num_requests, num_head)](
         query,  key_pool, value_pool, block_table, seq_lens, output,
         query_row_stride=query.stride(0), 
         query_head_stride=query.stride(1), 
+        output_row_stride=output.stride(0),
+        output_head_stride=output.stride(1),
         pool_block_stride=key_pool.stride(0), 
         pool_token_stride=key_pool.stride(1), 
         pool_head_stride=key_pool.stride(2), 

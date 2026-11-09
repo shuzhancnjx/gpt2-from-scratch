@@ -64,6 +64,17 @@ class PrefillBatch:
 
 class BaseKVCache(ABC):
 
+    # Does decode need the model's attention mask? True for every cache that attends
+    # over a full-width read (SDPA): the mask hides unwritten columns and idle rows. A
+    # cache whose kernel bounds each row by its own length sets it False, and the
+    # ModelRunner skips building the mask.
+    needs_mask = True
+
+    def begin_forward(self, prefill=None):
+        """Called once per forward, before the layers: compute whatever every layer would
+        otherwise recompute (write slots, sequence lengths). Default: nothing. The
+        forward's other bracket is advance(), once after the layers."""
+
     @abstractmethod
     def prefill_attend(self, layer_idx, query, key, value, prefill):
         """Prefill: store the packed prompts' k/v (1, H, sum(lens), D) -- token i at slot
@@ -82,7 +93,7 @@ class BaseKVCache(ABC):
 
     @abstractmethod
     def advance(self, T, prefill=None, active=None):
-        """Move the write positions, once per forward (not per layer)."""
+        """Move the write positions, once per forward (not per layer), after the layers."""
 
     @abstractmethod
     def seq_len(self):

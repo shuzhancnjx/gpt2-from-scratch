@@ -110,9 +110,10 @@ class ModelRunner:
     def decode_eager(self, sampling_params):
         """The decode step itself: model on the buffers, sample, tokens INTO next_token_gpu.
         Tensor ops only -- DecodeGraphs records exactly this as its body."""
+        attn_mask = self.mask() if self.cache.needs_mask else None     # a kernel needs none
         logits, _ = self.model(self.next_token_gpu, kv_cache=self.cache,
                                pos_ids=self.cache.seq_len().unsqueeze(1),
-                               attn_mask=self.mask(), cache_active=self.active_gpu)
+                               attn_mask=attn_mask, cache_active=self.active_gpu)
         sampler = sampling_params.sampler()
         return self.next_token_gpu.copy_(sampler(logits[:, -1, :self.enc.n_vocab]))
 

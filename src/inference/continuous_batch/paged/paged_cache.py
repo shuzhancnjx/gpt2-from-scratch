@@ -12,8 +12,9 @@ and each request owns only the blocks it was given, recorded in a block table:
 It implements BaseKVCache like RowKVCache does, so gpt.py cannot tell them apart:
 
   write: every new token goes to   slot = block_table[row, pos // bs] * bs + pos % bs,
-         computed on the device from tensors (no int(), no sync), then one
-         index_copy_ into a flat (num_blocks * bs, H, D) view of the pool.
+         computed on the device from tensors (no int(), no sync) once per forward
+         (begin_forward), then one index_copy_ per layer into a flat
+         (num_blocks * bs, H, D) view of the pool.
   read:  decode gathers the rows' blocks in logical order into (B, H, W, D) with
          W = max_blocks_per_seq * block_size. Column i is position i, exactly as in
          RowKVCache, so the scheduler's mask (cols <= pos) works unchanged. (Or, with
@@ -77,11 +78,18 @@ class PagedKVCache(BaseKVCache):
         self.batch_size = max_seqs
         self.device = device
 
-        # On CUDA, attention is always the Triton paged kernel: it reads K/V through the
-        # block table in place -- no gather, no mask. Decode: one row per request; prefill:
-        # one row per prompt token, all prompts in one launch. Triton runs only on NVIDIA
-        # GPUs, so on CPU / Apple GPUs the same attention runs as SDPA.
+        # On CUDA, attention is always a Triton kernel, no gather, no mask. Decode: the
+        # paged kernel (paged_attention.py) reads each row's K/V through the block table in
+        # place. Prefill: FlashAttention over the packed prompts (prefill_attention.py) --
+        # a prompt's keys are its own fresh k/v. Triton runs only on NVIDIA GPUs, so on
+        # CPU / Apple GPUs the same attention runs as SDPA.
         self.use_kernel = str(device).startswith('cuda')
+        self.needs_mask = not self.use_kernel          # the kernels bound each row themselves
+
+        # per-forward indices (begin_forward), shared by every layer's write and attention
+        self._decode_rows = torch.arange(max_seqs, device=device)
+        self._slots = None                             # flat pool index of each token written
+        self._decode_seq_lens = None                   # (max_seqs,) pos + 1, decode only
 
     # -- block table (host decisions → device) -------------------------------
 
@@ -103,21 +111,31 @@ class PagedKVCache(BaseKVCache):
 
     # -- writes and reads ------------------------------------------------------
 
-    def write(self, layer_idx, key, value, prefill=None):
-        """Store this layer's k/v in the pool, one index_copy_ per tensor.
+    def begin_forward(self, prefill=None):
+        """Once per forward, before the layers: the pool slot of every token this forward
+        writes, and (decode) every row's sequence length. All layers write the same slots
+        and attend over the same lengths, so computing them per layer (~10 small kernels
+        each) was pure overhead.
 
-        prefill=None   -- decode: every row writes one token at its own pos.
-        prefill=batch  -- packed prompts: token i goes to slot prefill.rows[i],
-                          position prefill.positions[i]. Nothing is read back.
+        prefill=None   -- decode: decode row r writes at its pos, attends over pos + 1.
+        prefill=batch  -- packed prompts: token i at prefill.rows[i], prefill.positions[i].
         """
-        assert layer_idx is not None, 'layer_idx is required when a cache is passed'
-        B, H, T, D = key.shape
         if prefill is not None:
-            rows, positions = prefill.rows, prefill.positions
+            self._slots = self.slots(prefill.rows, prefill.positions)
         else:
-            assert T == 1, f'decode writes one token per row, got {T}'
-            rows, positions = torch.arange(B, device=self.device), self.pos_gpu[:B]
-        slots = self.slots(rows, positions)                       # (B*T,), in (row, t) order
+            positions = self.pos_gpu[:self.max_seqs]
+            self._slots = self.slots(self._decode_rows, positions)
+            self._decode_seq_lens = positions + 1
+
+    def write(self, layer_idx, key, value, prefill=None):
+        """Store this layer's k/v in the pool at the slots begin_forward computed, one
+        index_copy_ per tensor. Decode: B rows, one token each (rows [0, B)). Prefill: the
+        packed prompts, (1, H, sum(lens), D). Nothing is read back."""
+        assert layer_idx is not None, 'layer_idx is required when a cache is passed'
+        assert self._slots is not None, 'begin_forward() before the layers write'
+        B, H, T, D = key.shape
+        assert prefill is not None or T == 1, f'decode writes one token per row, got {T}'
+        slots = self._slots[:B * T]                               # (B*T,), in (row, t) order
         self._flat(self.key[layer_idx]).index_copy_(0, slots, self._tokens_first(key))
         self._flat(self.value[layer_idx]).index_copy_(0, slots, self._tokens_first(value))
 
@@ -131,18 +149,18 @@ class PagedKVCache(BaseKVCache):
     def prefill_attend(self, layer_idx, query, key, value, prefill):
         """Store the packed prompts, then attend within each prompt.
 
-        CUDA: ONE kernel launch in which every prompt token is a row -- token t of a
-        prompt reads its own request's blocks up to position t (seq_len = t + 1): causal,
-        never across prompts. Elsewhere: one SDPA per prompt.
+        Every prompt starts at position 0 (no cached prefix), so its keys are exactly its
+        own packed k/v -- attention needs nothing from the pool. CUDA: one FlashAttention-
+        style Triton launch over the packed q/k/v (prefill_attention.py): tiles of queries
+        x tiles of keys on tensor cores, each query bounded to its own prompt. Elsewhere:
+        one SDPA per prompt.
         """
         self.write(layer_idx, key, value, prefill)
         if not self.use_kernel:
             return self.sdpa_prefill(query, key, value, prefill)
-        from inference.continuous_batch.paged.paged_attention import paged_attention
-        out = paged_attention(query[0].transpose(0, 1),                 # (sum(lens), H, D)
-                              self.key[layer_idx], self.value[layer_idx],
-                              self.block_table_gpu[prefill.rows],       # each token's request
-                              prefill.positions + 1)                    # causal
+        from inference.continuous_batch.paged.prefill_attention import prefill_attention
+        out = prefill_attention(query[0].transpose(0, 1), key[0].transpose(0, 1),
+                                value[0].transpose(0, 1), prefill.positions)   # (sum(lens), H, D)
         return out.transpose(0, 1).unsqueeze(0)                         # (1, H, sum(lens), D)
 
     def decode_attend(self, layer_idx, query, key, value, attn_mask):
@@ -159,7 +177,7 @@ class PagedKVCache(BaseKVCache):
             return self.sdpa_decode(layer_idx, query, attn_mask)
         from inference.continuous_batch.paged.paged_attention import paged_attention
         out = paged_attention(query[:, :, 0], self.key[layer_idx], self.value[layer_idx],
-                              self.block_table_gpu[:B], self.pos_gpu[:B] + 1)
+                              self.block_table_gpu[:B], self._decode_seq_lens[:B])
         return out.unsqueeze(2)
 
     def _flat(self, pool):

@@ -21,6 +21,7 @@ Nothing here reads the GPU back to the CPU: the engine does the one copy per ste
 """
 
 import torch
+import torch._dynamo
 
 from inference.base_kv_cache import PrefillBatch
 from inference.continuous_batch.paged.graph.decode_graph import DecodeGraphs
@@ -55,6 +56,13 @@ class ModelRunner:
         # in start() like the capture. The eager prefill fallback (a batch bigger than any
         # bucket) keeps the plain model: its shapes vary, and each would recompile.
         self.graph_model = torch.compile(model, dynamic=False) if use_graphs else model
+        if use_graphs:
+            # Dynamo keeps compiled versions per FUNCTION (GPT.forward), shared by every
+            # engine in the process, and silently runs eager past recompile_limit (default
+            # 8). One engine needs 1 + len(buckets) = 6 versions, all compiled in start(), so
+            # a second engine with other shapes (another max_seqs, a test, a benchmark)
+            # overflowed it -- measured on Colab. Room for many engines: the set is bounded.
+            torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 64)
         self.decode_graphs = DecodeGraphs(self) if use_graphs else None
         self.prefill_graphs = PrefillGraphs(self) if use_graphs else None
 

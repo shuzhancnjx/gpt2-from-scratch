@@ -1,5 +1,10 @@
 """Paged engine: requests own fixed-size blocks from a shared pool (PagedKVCache).
 
-decode_attention and prefill_attention (the Triton kernels) are not imported here: Triton
-needs CUDA, so importing them would break this package on the Mac. Import them by module path.
+    engine.py           PagedEngine: the orchestrator
+    paged_scheduler.py  PagedScheduler: policy
+    block/              BlockManager, BlockAllocator: memory
+    paged_cache.py      PagedKVCache: the pools, block table, positions
+    attention/          the Triton attention kernels (decode, prefill) -- CUDA only, so
+                        not imported here; PagedKVCache imports them by module path
+    graph/              PrefillGraphs, DecodeGraphs: CUDA graphs
 """

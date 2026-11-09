@@ -1,4 +1,4 @@
-"""The FlashAttention-style prefill kernel (paged/prefill_attention.py) against causal
+"""The FlashAttention-style prefill kernel (paged/attention/prefill_attention.py) against causal
 SDPA run on each prompt alone. CUDA only: Triton needs an NVIDIA GPU."""
 
 import pytest
@@ -41,14 +41,14 @@ LENS = [[1], [5], [64], [65], [1, 1, 1], [70, 3, 130, 1], [16, 200, 33, 64, 7], 
 @pytest.mark.parametrize('lens', LENS)
 @pytest.mark.parametrize('dtype,tol', [(torch.float32, 1e-4), (torch.float16, 2e-3)])
 def test_matches_per_prompt_sdpa(lens, dtype, tol):
-    from inference.continuous_batch.paged.prefill_attention import prefill_attention
+    from inference.continuous_batch.paged.attention.prefill_attention import prefill_attention
     q, k, v, positions = packed(lens, dtype)
     torch.testing.assert_close(prefill_attention(q, k, v, positions), reference(q, k, v, lens),
                                atol=tol, rtol=tol)
 
 
 def test_reads_strided_qkv_views_in_place():
-    from inference.continuous_batch.paged.prefill_attention import prefill_attention
+    from inference.continuous_batch.paged.attention.prefill_attention import prefill_attention
     lens = [70, 3, 130]
     q, k, v, positions = packed(lens, torch.float16, fused=True)
     assert not q.is_contiguous()
@@ -59,7 +59,7 @@ def test_reads_strided_qkv_views_in_place():
 def test_padding_tokens_do_not_touch_real_ones():
     """A CUDA graph's bucket pads with position-0 tokens: each attends only to itself,
     and the real prompts' outputs are unchanged."""
-    from inference.continuous_batch.paged.prefill_attention import prefill_attention
+    from inference.continuous_batch.paged.attention.prefill_attention import prefill_attention
     lens = [70, 3, 130]
     q, k, v, positions = packed(lens, torch.float16)
     real = prefill_attention(q, k, v, positions)

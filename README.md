@@ -48,8 +48,9 @@ src/                       one top-level package per layer (no umbrella package)
           block_manager.py       BlockManager: blocks + block-table rows per request
           block_allocator.py     BlockAllocator: the free list of blocks, scratch block
         paged_cache.py         PagedKVCache: K/V pools, block table, positions
-        decode_attention.py    Triton decode attention through the block table (CUDA)
-        prefill_attention.py   Triton FlashAttention over packed prompts: prefill (CUDA)
+        attention/             Triton attention kernels (CUDA)
+          decode_attention.py    decode: writes the new K/V, reads history through the block table
+          prefill_attention.py   prefill: FlashAttention over the packed prompts
         graph/                 PrefillGraphs, DecodeGraphs (CUDA graphs)
   app/
     llm.py                 LLM: the front door -- load once, pick an engine, generate()
@@ -213,7 +214,7 @@ engine.run(prompts, max_new_tokens=128)
 
 | attention (paged cache) | how |
 |---|---|
-| CUDA (always) | Decode: `decode_attention.py`, the Triton decode kernel: walks the block table up to each row's real length with an online softmax, reading K/V straight from the pool, one program per (request, head). Prefill: `prefill_attention.py`, FlashAttention over the packed prompts: tiles of queries x tiles of keys on tensor cores, each query bounded to its own prompt (prompts start at 0, so no pool reads) |
+| CUDA (always) | Decode: `attention/decode_attention.py`, the Triton decode kernel: walks the block table up to each row's real length with an online softmax, reading K/V straight from the pool, one program per (request, head). Prefill: `attention/prefill_attention.py`, FlashAttention over the packed prompts: tiles of queries x tiles of keys on tensor cores, each query bounded to its own prompt (prompts start at 0, so no pool reads) |
 | CPU / Apple GPU | the same attention as SDPA: per-prompt causal for prefill, gather + mask for decode (Triton runs only on NVIDIA GPUs) |
 
 With `cuda_graph=True` (CUDA), the `ModelRunner` puts the model under `torch.compile`

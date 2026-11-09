@@ -9,7 +9,7 @@ replays all of them with one launch. A graph needs fixed shapes, so:
              scratch block and attend one scratch slot -- their output is never read
 
 Real tokens are computed exactly as in the eager prefill: each attends only within its
-own prompt (prefill_attention.py) and writes its k/v into its own request's blocks.
+own prompt (attention/prefill_attention.py) and writes its k/v into its own request's blocks.
 
 The indices themselves are built on the CPU in a pinned buffer and moved with one async
 copy per prefill (_buffers, run).

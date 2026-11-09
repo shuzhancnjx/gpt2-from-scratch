@@ -79,8 +79,8 @@ class PagedKVCache(BaseKVCache):
         self.device = device
 
         # On CUDA, attention is always a Triton kernel, no gather, no mask. Decode: the
-        # kernel (decode_attention.py) reads each row's K/V through the block table in
-        # place. Prefill: FlashAttention over the packed prompts (prefill_attention.py) --
+        # kernel (attention/decode_attention.py) reads each row's K/V through the block table in
+        # place. Prefill: FlashAttention over the packed prompts (attention/prefill_attention.py) --
         # a prompt's keys are its own fresh k/v. Triton runs only on NVIDIA GPUs, so on
         # CPU / Apple GPUs the same attention runs as SDPA.
         self.use_kernel = str(device).startswith('cuda')
@@ -151,14 +151,14 @@ class PagedKVCache(BaseKVCache):
 
         Every prompt starts at position 0 (no cached prefix), so its keys are exactly its
         own packed k/v -- attention needs nothing from the pool. CUDA: one FlashAttention-
-        style Triton launch over the packed q/k/v (prefill_attention.py): tiles of queries
+        style Triton launch over the packed q/k/v (attention/prefill_attention.py): tiles of queries
         x tiles of keys on tensor cores, each query bounded to its own prompt. Elsewhere:
         one SDPA per prompt.
         """
         self.write(layer_idx, key, value, prefill)
         if not self.use_kernel:
             return self.sdpa_prefill(query, key, value, prefill)
-        from inference.continuous_batch.paged.prefill_attention import prefill_attention
+        from inference.continuous_batch.paged.attention.prefill_attention import prefill_attention
         out = prefill_attention(query[0].transpose(0, 1), key[0].transpose(0, 1),
                                 value[0].transpose(0, 1), prefill.positions)   # (sum(lens), H, D)
         return out.transpose(0, 1).unsqueeze(0)                         # (1, H, sum(lens), D)
@@ -176,7 +176,7 @@ class PagedKVCache(BaseKVCache):
         if not self.use_kernel:
             self.write(layer_idx, key, value)
             return self.sdpa_decode(layer_idx, query, attn_mask)
-        from inference.continuous_batch.paged.decode_attention import decode_attention
+        from inference.continuous_batch.paged.attention.decode_attention import decode_attention
         out = decode_attention(query[:, :, 0], key[:, :, 0], value[:, :, 0],      # the kernel
                                self.key[layer_idx], self.value[layer_idx],        # also writes
                                self.block_table_gpu[:B], self._decode_seq_lens[:B],

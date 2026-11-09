@@ -59,7 +59,7 @@ def make(dtype, seq_lens=SEQ_LENS, H=12, D=64, block_size=16, max_blocks=64, num
 
 @pytest.mark.parametrize('dtype, tol', [(torch.float32, 1e-4), (torch.float16, 2e-3)])
 def test_matches_the_gather_path(dtype, tol):
-    from inference.continuous_batch.paged.decode_attention import decode_attention
+    from inference.continuous_batch.paged.attention.decode_attention import decode_attention
     args = make(dtype)
     torch.testing.assert_close(decode_attention(**args), reference(**args), atol=tol, rtol=tol)
 
@@ -67,14 +67,14 @@ def test_matches_the_gather_path(dtype, tol):
 @pytest.mark.parametrize('seq_len', SEQ_LENS)
 def test_each_length_on_its_own(seq_len):
     """Pinpoints which edge fails, if the batched test does."""
-    from inference.continuous_batch.paged.decode_attention import decode_attention
+    from inference.continuous_batch.paged.attention.decode_attention import decode_attention
     args = make(torch.float32, seq_lens=[seq_len])
     torch.testing.assert_close(decode_attention(**args), reference(**args), atol=1e-4, rtol=1e-4)
 
 
 def test_never_reads_past_the_real_length():
     """Overwrite every slot beyond each row's length: the output must not move."""
-    from inference.continuous_batch.paged.decode_attention import decode_attention
+    from inference.continuous_batch.paged.attention.decode_attention import decode_attention
     args = make(torch.float32)
     before = decode_attention(**args)
     block_size = args['key_pool'].shape[1]
@@ -89,7 +89,7 @@ def test_never_reads_past_the_real_length():
 def test_writes_the_new_token_and_ignores_what_its_slot_held():
     """The new k/v land at their slots, and the attention uses them -- not the stale
     value the slot held before (the kernel takes the new token from registers)."""
-    from inference.continuous_batch.paged.decode_attention import decode_attention
+    from inference.continuous_batch.paged.attention.decode_attention import decode_attention
     args = make(torch.float32)
     H, D = args['query'].shape[1:]
     flat = lambda pool: pool.view(-1, H, D)
@@ -104,14 +104,14 @@ def test_writes_the_new_token_and_ignores_what_its_slot_held():
 
 def test_tile_size_does_not_change_the_result():
     """A tile spans several blocks; 16 (one block) and 128 must agree with 64."""
-    from inference.continuous_batch.paged.decode_attention import decode_attention
+    from inference.continuous_batch.paged.attention.decode_attention import decode_attention
     outs = [decode_attention(**make(torch.float32), tile=t) for t in (16, 64, 128)]
     for o in outs[1:]:
         torch.testing.assert_close(o, outs[0], atol=1e-5, rtol=1e-5)
 
 
 def test_output_shape_and_dtype():
-    from inference.continuous_batch.paged.decode_attention import decode_attention
+    from inference.continuous_batch.paged.attention.decode_attention import decode_attention
     args = make(torch.float16)
     out = decode_attention(**args)
     assert out.shape == args['query'].shape and out.dtype == torch.float16

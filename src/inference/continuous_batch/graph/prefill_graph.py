@@ -24,7 +24,7 @@ BUCKETS = (64, 128, 256, 512, 1024)
 
 
 class PrefillGraphs(BaseGraphs):
-    """Prefill graphs for one PagedEngine.
+    """Prefill graphs for one ModelRunner (its cache must have a pad_row: PagedKVCache).
 
     runner:   the ModelRunner (its model, cache, device and max_prefill_prompts are used)
     buckets:  padded token counts to capture, smallest first

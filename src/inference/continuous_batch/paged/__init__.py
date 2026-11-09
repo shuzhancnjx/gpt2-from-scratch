@@ -6,5 +6,6 @@
     paged_cache.py      PagedKVCache: the pools, block table, positions
     attention/          the Triton attention kernels (decode, prefill) -- CUDA only, so
                         not imported here; PagedKVCache imports them by module path
-    graph/              PrefillGraphs, DecodeGraphs: CUDA graphs
+
+(The CUDA graphs live in continuous_batch/graph/, beside the ModelRunner that owns them.)
 """

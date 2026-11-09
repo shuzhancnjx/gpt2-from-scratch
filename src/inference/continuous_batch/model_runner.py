@@ -24,8 +24,8 @@ import torch
 import torch._dynamo
 
 from inference.base_kv_cache import PrefillBatch
-from inference.continuous_batch.paged.graph.decode_graph import DecodeGraphs
-from inference.continuous_batch.paged.graph.prefill_graph import PrefillGraphs
+from inference.continuous_batch.graph.decode_graph import DecodeGraphs
+from inference.continuous_batch.graph.prefill_graph import PrefillGraphs
 
 
 class ModelRunner:

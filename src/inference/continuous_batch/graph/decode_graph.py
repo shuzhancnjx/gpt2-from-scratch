@@ -29,7 +29,7 @@ from inference.sampling import SamplingParams
 
 
 class DecodeGraphs(BaseGraphs):
-    """Decode graphs for one PagedEngine: key = sampler setting, run(sampling_params) -> tokens."""
+    """Decode graphs for one ModelRunner: key = sampler setting, run(sampling_params) -> tokens."""
 
     GREEDY = (0.0, None, None)                  # the key of plain argmax decoding
 

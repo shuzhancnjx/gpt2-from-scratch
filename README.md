@@ -38,6 +38,8 @@ src/                       one top-level package per layer (no umbrella package)
       continuous_engine.py   ContinuousEngine: run() / generate() over each engine's _run() loop
       model_runner.py        ModelRunner: execution (GPU) -- model calls, decode buffers, CUDA
                              graphs; cache-agnostic, shared by both engines
+      graph/                 PrefillGraphs, DecodeGraphs: the runner's steps as CUDA graphs
+                             (prefill pads into PagedKVCache's pad_row)
       row/                   one full-width KV row per request
         row_cache.py           RowKVCache
         engine.py              RowEngine (the simple baseline)
@@ -51,7 +53,6 @@ src/                       one top-level package per layer (no umbrella package)
         attention/             Triton attention kernels (CUDA)
           decode_attention.py    decode: writes the new K/V, reads history through the block table
           prefill_attention.py   prefill: FlashAttention over the packed prompts
-        graph/                 PrefillGraphs, DecodeGraphs (CUDA graphs)
   app/
     llm.py                 LLM: the front door -- load once, pick an engine, generate()
     chat_server.py         FastAPI: chat page + OpenAI-compatible /v1 API, one engine thread
@@ -220,9 +221,9 @@ engine.run(prompts, max_new_tokens=128)
 With `cuda_graph=True` (CUDA), the `ModelRunner` puts the model under `torch.compile`
 and captures CUDA graphs of the compiled model, before the first run:
 
-- `DecodeGraphs` (`paged/graph/decode_graph.py`): the whole decode step (forward,
+- `DecodeGraphs` (`continuous_batch/graph/decode_graph.py`): the whole decode step (forward,
   sampler) as one launch, one graph per sampler setting.
-- `PrefillGraphs` (`paged/graph/prefill_graph.py`): the packed prefill, one graph per
+- `PrefillGraphs` (`continuous_batch/graph/prefill_graph.py`): the packed prefill, one graph per
   token bucket (64 ... 1024); its indices arrive in one pinned host-to-device copy.
 - Inductor fuses the work around attention: each residual add into the next LayerNorm,
   GELU, the cache's index math. The attention itself is our two Triton kernels.

@@ -190,7 +190,7 @@ def create_app(llm, sampling_params=None, history_turns=0, gather_window=0.03, i
     """sampling_params: the SamplingParams the chat page uses (default: temperature 0.8, top-k 40,
     64 new tokens). The /v1 routes take theirs from each request."""
     sampling_params = sampling_params or SamplingParams(max_new_tokens=64, temperature=0.8, top_k=40)
-    max_batch = getattr(llm.engine, 'B', 8)
+    max_batch = getattr(llm.engine, 'max_seqs', 8)           # the static engine has none
     engine = Engine(llm, max_batch=max_batch, gather_window=gather_window)
     enc, context = llm.enc, llm.config.block_size
     name = (info or {}).get('checkpoint', 'gpt2')

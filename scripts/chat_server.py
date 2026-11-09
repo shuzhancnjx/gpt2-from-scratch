@@ -38,12 +38,14 @@ def main():
     p.add_argument('--device', default='auto')
     p.add_argument('--host', default='127.0.0.1')
     p.add_argument('--port', type=int, default=8765)
-    p.add_argument('--max-seqs', type=int, default=8)
+    p.add_argument('--max-seqs', type=int, default=None,
+                   help='decode rows (default: the engine\'s -- 64 on CUDA, 4 elsewhere)')
     p.add_argument('--block-size', type=int, default=16)
     p.add_argument('--max-new', type=int, default=64)
     p.add_argument('--temperature', type=float, default=0.8)
     p.add_argument('--top-k', type=int, default=40)
-    p.add_argument('--cuda-graph', action='store_true', help='CUDA: replay the decode step as a graph')
+    p.add_argument('--cuda-graph', action='store_true',
+                   help='CUDA: torch.compile the model and replay prefill + decode as CUDA graphs')
     p.add_argument('--history-turns', type=int, default=0,
                    help='earlier exchanges to include in the prompt (0 = single-turn; '
                         'a base model copies its own past replies)')

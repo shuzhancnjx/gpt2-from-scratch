@@ -35,6 +35,7 @@ def test_chat_page_and_info(client):
     assert '<title>GPT-2 Chat</title>' in client.get('/').text
     info = client.get('/api/info').json()
     assert info['engine'] == 'paged' and info['checkpoint'] == 'tiny.pt'
+    assert info['max_seqs'] == 4, 'the batch limit must follow the engine, not a fallback'
 
 
 def test_ui_chat_matches_a_direct_generate(client, llm):

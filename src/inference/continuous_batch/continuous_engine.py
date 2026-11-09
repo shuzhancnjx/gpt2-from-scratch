@@ -21,6 +21,11 @@ from inference.sampling import SamplingParams
 
 class ContinuousEngine(BaseEngine):
 
+    @property
+    def max_seqs(self):
+        """Decode rows: the most requests decoding at once (the chat server batches up to it)."""
+        return self.runner.B
+
     @torch.inference_mode()
     def run(self, prompts, max_new_tokens=32):
         """Greedy convenience: prompt + completion for every prompt, in order."""

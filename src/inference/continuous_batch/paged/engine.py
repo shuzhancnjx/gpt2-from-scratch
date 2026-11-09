@@ -35,12 +35,15 @@ from inference.continuous_batch.paged.paged_scheduler import PagedScheduler
 
 class PagedEngine(ContinuousEngine):
 
-    def __init__(self, model, enc, config, max_seqs=4, block_size=16, num_blocks=None,
+    def __init__(self, model, enc, config, max_seqs=None, block_size=16, num_blocks=None,
                  max_tokens=None, watermark=0, device='cpu', dtype=torch.float32,
                  cuda_graph=False, prefilled_rows=None, max_prefill_tokens='auto'):
         """
         model, enc, config  the loaded GPT, its tokenizer, its GPTConfig
-        max_seqs            decode rows: the most requests decoding at once
+        max_seqs            decode rows: the most requests decoding at once. Default: 64 on
+                            CUDA (A100, 124M: the step reads all weights whatever the rows, so
+                            16 -> 64 rows = 2.4x tok/s for +21% step time; KV 2.4 GB), 4
+                            elsewhere (a CPU pool of 64 full-width rows is gigabytes)
         block_size          tokens per KV block (16)
         num_blocks          size of the shared KV pool in blocks, incl. the scratch block.
                             Default: as much memory as a RowKVCache of max_seqs rows
@@ -58,6 +61,8 @@ class PagedEngine(ContinuousEngine):
                             fixed cost). None = no cap.
         """
         self.enc = enc
+        if max_seqs is None:
+            max_seqs = 64 if str(device).startswith('cuda') else 4
         self.W = max_tokens if max_tokens is not None else config.block_size
         if self.W % block_size:
             raise ValueError(f'block_size {block_size} must divide max_tokens {self.W}')

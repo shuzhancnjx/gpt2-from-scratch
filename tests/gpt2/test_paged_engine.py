@@ -454,3 +454,14 @@ def test_scheduler_budget_and_fcfs_without_a_model():
     assert [a.req for a in first] == [0]
     tight.prefilled_with(first, [5])                               # as the engine does next
     assert tight.schedule(max_new_tokens=2).prefill == []          # no room: req 1 waits
+
+
+def test_default_decode_rows_by_device(parts):
+    """64 decode rows on CUDA (the step reads all weights whatever the rows), 4 elsewhere;
+    max_seqs is what the chat server batches up to."""
+    model, enc, cfg = parts
+    assert PagedEngine(model, enc, cfg, block_size=4, max_tokens=W).max_seqs == 4
+    assert PagedEngine(model, enc, cfg, max_seqs=7, block_size=4, max_tokens=W).max_seqs == 7
+    if torch.cuda.is_available():
+        assert PagedEngine(model.to('cuda'), enc, cfg, block_size=4, max_tokens=W,
+                           device='cuda').max_seqs == 64

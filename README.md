@@ -48,7 +48,7 @@ src/                       one top-level package per layer (no umbrella package)
           block_manager.py       BlockManager: blocks + block-table rows per request
           block_allocator.py     BlockAllocator: the free list of blocks, scratch block
         paged_cache.py         PagedKVCache: K/V pools, block table, positions
-        paged_attention.py     Triton paged attention over the block table: decode (CUDA)
+        decode_attention.py    Triton decode attention through the block table (CUDA)
         prefill_attention.py   Triton FlashAttention over packed prompts: prefill (CUDA)
         graph/                 PrefillGraphs, DecodeGraphs (CUDA graphs)
   app/
@@ -211,9 +211,9 @@ engine = PagedEngine(model, enc, cfg, max_seqs=32, device='cuda', dtype=torch.fl
 engine.run(prompts, max_new_tokens=128)
 ```
 
-| paged attention | how |
+| attention (paged cache) | how |
 |---|---|
-| CUDA (always) | Decode: `paged_attention.py`, the Triton paged kernel: walks the block table up to each row's real length with an online softmax, reading K/V straight from the pool, one program per (request, head). Prefill: `prefill_attention.py`, FlashAttention over the packed prompts: tiles of queries x tiles of keys on tensor cores, each query bounded to its own prompt (prompts start at 0, so no pool reads) |
+| CUDA (always) | Decode: `decode_attention.py`, the Triton decode kernel: walks the block table up to each row's real length with an online softmax, reading K/V straight from the pool, one program per (request, head). Prefill: `prefill_attention.py`, FlashAttention over the packed prompts: tiles of queries x tiles of keys on tensor cores, each query bounded to its own prompt (prompts start at 0, so no pool reads) |
 | CPU / Apple GPU | the same attention as SDPA: per-prompt causal for prefill, gather + mask for decode (Triton runs only on NVIDIA GPUs) |
 
 With `cuda_graph=True`, `DecodeGraphs` (`paged/graph/decode_graph.py`) replays the whole

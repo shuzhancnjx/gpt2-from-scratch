@@ -1,6 +1,6 @@
 """Prefill attention in Triton: FlashAttention over packed prompts (CUDA only).
 
-The paged kernel (paged_attention.py) serves prefill as one query per program: no tensor
+The decode kernel (decode_attention.py) served prefill as one query per program: no tensor
 cores, and every token of a prompt re-reads the whole prompt's K/V -- 51% of a 1024-token
 prefill (profile_step.py, A100). But a prompt starts from position 0, so the keys it
 attends over are exactly its own packed k/v: nothing has to come from the pool. This

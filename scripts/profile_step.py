@@ -47,7 +47,7 @@ MODELS = {
 # substring -> category, first match wins (order matters: a GELU or an index kernel is
 # also an "elementwise" kernel by name)
 CATEGORIES = [
-    ('attention', ('paged_attention', 'flash', 'fmha', 'attention')),
+    ('attention', ('decode_attention', 'prefill_attention', 'flash', 'fmha', 'attention')),
     ('matmul', ('gemm', 'gemv', 'cutlass', 'cublas', 'splitk', 'sm80_', 'sm90_', 'ampere_',
                 'aten::addmm', 'aten::mm', 'aten::bmm', 'aten::linear', 'aten::matmul')),
     ('layernorm', ('layer_norm', 'layernorm')),

@@ -1,4 +1,4 @@
-"""Paged attention in Triton (P1.5a): one query per row, K/V read through the block table.
+"""Decode attention in Triton (P1.5a): one query per row, K/V read through the block table.
 
 Reads K/V straight from the block pool -- no gather to the full width W, no mask.
 One program per (row, head); row r attends over the first seq_lens[r] tokens of the
@@ -20,7 +20,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _paged_attention_kernel(
+def _decode_attention_kernel(
     query_ptr, key_pool_ptr, value_pool_ptr, block_table_ptr, seq_lens_ptr, output_ptr, 
     query_row_stride,  query_head_stride, output_row_stride, output_head_stride,
     pool_block_stride, pool_token_stride,  pool_head_stride, table_row_stride, 
@@ -74,7 +74,7 @@ def _paged_attention_kernel(
     tl.store(output_ptr + request * output_row_stride + head * output_head_stride + dim_offsets, 
                 attention_output.to(output_ptr.dtype.element_ty))
 
-def paged_attention(query, key_pool, value_pool, block_table, seq_lens):
+def decode_attention(query, key_pool, value_pool, block_table, seq_lens):
     """
     query        (B, H, D)                       one query per row; any strides with a
                                                  unit last dim (read in place, no copy)
@@ -95,7 +95,7 @@ def paged_attention(query, key_pool, value_pool, block_table, seq_lens):
 
     output = torch.empty(query.shape, dtype=query.dtype, device=query.device)   # contiguous
 
-    _paged_attention_kernel[(num_requests, num_head)](
+    _decode_attention_kernel[(num_requests, num_head)](
         query,  key_pool, value_pool, block_table, seq_lens, output,
         query_row_stride=query.stride(0), 
         query_head_stride=query.stride(1), 

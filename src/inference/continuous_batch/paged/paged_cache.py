@@ -79,7 +79,7 @@ class PagedKVCache(BaseKVCache):
         self.device = device
 
         # On CUDA, attention is always a Triton kernel, no gather, no mask. Decode: the
-        # paged kernel (paged_attention.py) reads each row's K/V through the block table in
+        # kernel (decode_attention.py) reads each row's K/V through the block table in
         # place. Prefill: FlashAttention over the packed prompts (prefill_attention.py) --
         # a prompt's keys are its own fresh k/v. Triton runs only on NVIDIA GPUs, so on
         # CPU / Apple GPUs the same attention runs as SDPA.
@@ -175,8 +175,8 @@ class PagedKVCache(BaseKVCache):
         self.write(layer_idx, key, value)
         if not self.use_kernel:
             return self.sdpa_decode(layer_idx, query, attn_mask)
-        from inference.continuous_batch.paged.paged_attention import paged_attention
-        out = paged_attention(query[:, :, 0], self.key[layer_idx], self.value[layer_idx],
+        from inference.continuous_batch.paged.decode_attention import decode_attention
+        out = decode_attention(query[:, :, 0], self.key[layer_idx], self.value[layer_idx],
                               self.block_table_gpu[:B], self._decode_seq_lens[:B])
         return out.unsqueeze(2)
 

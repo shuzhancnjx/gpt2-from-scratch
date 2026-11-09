@@ -133,7 +133,8 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None, kv_cache: 'BaseKVCache | None' = None, pos_ids=None, attn_mask=None,
                 prefill: 'PrefillBatch | None' = None, cache_active=None):
 
-        assert not (kv_cache is not None and prefill is None and attn_mask is None), \
+        assert not (kv_cache is not None and prefill is None and attn_mask is None
+                    and kv_cache.needs_mask), \
             'reading a full-width cache needs a mask to hide unwritten slots'
 
         B, T = idx.shape
@@ -158,6 +159,8 @@ class GPT(nn.Module):
 
         x = token_embd + pos_embd
 
+        if kv_cache is not None:
+            kv_cache.begin_forward(prefill)          # per-forward indices, once for all layers
         for i, block in enumerate(self.transformer.h):
             x = block(x, kv_cache=kv_cache, layer_idx=i, attn_mask=sdpa_mask,
                       prefill=prefill)

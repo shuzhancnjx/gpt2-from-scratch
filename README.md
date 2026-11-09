@@ -48,7 +48,8 @@ src/                       one top-level package per layer (no umbrella package)
           block_manager.py       BlockManager: blocks + block-table rows per request
           block_allocator.py     BlockAllocator: the free list of blocks, scratch block
         paged_cache.py         PagedKVCache: K/V pools, block table, positions
-        paged_attention.py     Triton paged attention over the block table (CUDA)
+        decode_attention.py    Triton decode attention through the block table (CUDA)
+        prefill_attention.py   Triton FlashAttention over packed prompts: prefill (CUDA)
         graph/                 PrefillGraphs, DecodeGraphs (CUDA graphs)
   app/
     llm.py                 LLM: the front door -- load once, pick an engine, generate()
@@ -206,21 +207,29 @@ tokens after a decode. Because the policy needs no model, it is tested without o
 
 ```python
 engine = PagedEngine(model, enc, cfg, max_seqs=32, device='cuda', dtype=torch.float16,
-                     cuda_graph=True)       # prefill and decode replayed as CUDA graphs
+                     cuda_graph=True)       # compiled, then replayed as CUDA graphs
 engine.run(prompts, max_new_tokens=128)
 ```
 
-| paged attention | how |
+| attention (paged cache) | how |
 |---|---|
-| CUDA (always) | `paged_attention.py`, the Triton kernel: walks the block table up to each row's real length with an online softmax, reading K/V straight from the pool. Decode: one row per request. Prefill: one row per prompt token, all prompts in one launch |
+| CUDA (always) | Decode: `decode_attention.py`, the Triton decode kernel: walks the block table up to each row's real length with an online softmax, reading K/V straight from the pool, one program per (request, head). Prefill: `prefill_attention.py`, FlashAttention over the packed prompts: tiles of queries x tiles of keys on tensor cores, each query bounded to its own prompt (prompts start at 0, so no pool reads) |
 | CPU / Apple GPU | the same attention as SDPA: per-prompt causal for prefill, gather + mask for decode (Triton runs only on NVIDIA GPUs) |
 
-With `cuda_graph=True`, `DecodeGraphs` (`paged/graph/decode_graph.py`) replays the whole
-decode step (forward, mask, sampler) with one launch -- one graph per sampler setting,
-captured before the first run that needs it. Prefill, admission and retirement stay
-outside the graph; they write the same fixed buffers the graph reads. Measured on an A100 (32 requests, gather path):
-10.3 -> 3.9 ms per decode step. Details and the remaining bottlenecks are in
-`docs/benchmarks/paging.md` and `docs/learning-plan.md`.
+With `cuda_graph=True` (CUDA), the `ModelRunner` puts the model under `torch.compile`
+and captures CUDA graphs of the compiled model, before the first run:
+
+- `DecodeGraphs` (`paged/graph/decode_graph.py`): the whole decode step (forward,
+  sampler) as one launch, one graph per sampler setting.
+- `PrefillGraphs` (`paged/graph/prefill_graph.py`): the packed prefill, one graph per
+  token bucket (64 ... 1024); its indices arrive in one pinned host-to-device copy.
+- Inductor fuses the work around attention: each residual add into the next LayerNorm,
+  GELU, the cache's index math. The attention itself is our two Triton kernels.
+
+Admission and retirement stay outside the graphs; they write the fixed buffers the
+graphs read. Measured on an A100 (124M fp16, 16 decode rows): decode step 1.53 ms
+(graphs only) -> 1.09 ms (+ fused K/V write, tiled kernel) -> 0.79 ms (+ torch.compile).
+Details and the remaining bottlenecks are in `docs/learning-plan.md`.
 
 ### Running it
 

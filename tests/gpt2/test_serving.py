@@ -267,7 +267,7 @@ def test_decode_feeds_per_row_positions_and_leaves_idle_slots_alone(sched_parts)
                          sched.runner.active_gpu.tolist()))
         return real(idx, **kwargs)
 
-    sched.runner.model = spy
+    sched.runner.model = sched.runner.graph_model = spy      # decode calls graph_model
     sched.run(PROMPTS[:3], max_new_tokens=4)
 
     assert seen, 'no decode step was observed'

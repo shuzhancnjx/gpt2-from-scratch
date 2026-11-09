@@ -5,7 +5,7 @@ model_runner.py       ModelRunner: the model calls, decode buffers and CUDA grap
 row/    one full-width KV row per request: RowEngine + RowKVCache -- the simple baseline
 paged/  KV blocks from a shared pool: PagedEngine, the orchestrator of PagedScheduler
         (policy), BlockManager (memory, block/) and the ModelRunner (PagedKVCache, the
-        Triton kernel in paged_attention.py, CUDA graphs in graph/)
+        Triton kernels decode_attention.py + prefill_attention.py, CUDA graphs in graph/)
 """
 
 from inference.continuous_batch.continuous_engine import ContinuousEngine

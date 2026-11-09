@@ -14,6 +14,10 @@ bench_admission / bench_paging time whole steps; this one opens them up. Three p
   3. prefill          one packed prefill of --prefill-tokens tokens: kernels by category
                       (eager), then graph replay time and the bucket padding it pays
 
+On CUDA the engine runs the model under torch.compile (its graphs record the compiled
+model), so the kernel tables show Inductor's fused kernels
+(triton_per_fused_add_native_layer_norm_...), and the end reports Dynamo's graph breaks.
+
 The engine is filled the normal way (prompts admitted until every decode row is busy)
 and nothing finishes while it is measured, so every decode step is a full-batch step.
 CUDA for parts 2 and 3's graphs and the Triton kernel; on a CPU it runs the eager parts
@@ -47,7 +51,7 @@ MODELS = {
 # substring -> category, first match wins (order matters: a GELU or an index kernel is
 # also an "elementwise" kernel by name)
 CATEGORIES = [
-    ('attention', ('paged_attention', 'flash', 'fmha', 'attention')),
+    ('attention', ('decode_attention', 'prefill_attention', 'flash', 'fmha', 'attention')),
     ('matmul', ('gemm', 'gemv', 'cutlass', 'cublas', 'splitk', 'sm80_', 'sm90_', 'ampere_',
                 'aten::addmm', 'aten::mm', 'aten::bmm', 'aten::linear', 'aten::matmul')),
     ('layernorm', ('layer_norm', 'layernorm')),
@@ -208,7 +212,9 @@ def main():
     sp = SamplingParams(max_new_tokens=W - args.context - 16)      # nothing finishes
     prompt_ids = [[rng.randrange(50000) for _ in range(args.context)] for _ in range(B)]
     print(f'device {device}  model {args.model}  dtype {dtype}  decode rows {B}  '
-          f'context ~{args.context}  graphs {runner.decode_graphs is not None}')
+          f'context ~{args.context}  graphs {runner.decode_graphs is not None}  '
+          f'compiled {runner.graph_model is not model}')
+    t_start = time.perf_counter()
     out = dict(args=vars(args), device=device)
 
     with torch.inference_mode():
@@ -285,6 +291,14 @@ def main():
                       f'replay {only:.3f} ms, with buffer fill + sampling {full:.3f} ms')
                 out['prefill_graph'] = dict(bucket=bucket, real_tokens=sum(lens),
                                             replay_ms=only, run_ms=full)
+
+    if runner.graph_model is not model:
+        from torch._dynamo.utils import counters
+        breaks = dict(counters['graph_break'])
+        print(f'\ncompile: {sum(breaks.values())} graph breaks'
+              + ''.join(f'\n  {n}x  {reason[:110]}' for reason, n in breaks.items()))
+        print(f'total run time incl. compilation: {time.perf_counter() - t_start:.0f} s')
+        out['graph_breaks'] = breaks
 
     if args.out:
         os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)

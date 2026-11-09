@@ -98,7 +98,7 @@ def _decode_attention_kernel(
 
 
 def decode_attention(query, key, value, key_pool, value_pool, block_table, seq_lens, slots,
-                     tile=64):
+                     tile=128):
     """
     query        (B, H, D)                       one query per row
     key, value   (B, H, D)                       this step's new token per row -- written
@@ -110,6 +110,9 @@ def decode_attention(query, key, value, key_pool, value_pool, block_table, seq_l
     slots        (B,), int                       the new token's flat pool slot,
                                                  physical block * block_size + offset
     returns      (B, H, D)
+    tile         history tokens per loop iteration. 128 (A100 sweep, sweep_decode_attention.py):
+                 vs 64, 16 rows 59 -> 81% of the bandwidth floor, 64 rows 79 -> 82%; 256 adds
+                 little more (per-iteration cost starts to grow) for twice the registers
 
     query / key / value: any strides with a unit last dim (views of the fused qkv, no copy).
     """

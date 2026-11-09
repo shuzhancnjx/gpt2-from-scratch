@@ -18,26 +18,14 @@ import json
 import os
 import time
 
-import tiktoken
 import torch
 
 from utils.data import DEFAULT_DATA_ROOT, load_tokens
 from utils.device import pick_device, synchronize
 from evaluation import evaluate_hellaswag, val_nll
-from model.gpt2.gpt import GPT, GPTConfig
+from model.gpt2.loading import load_model
 
 POSITIONS = (0, 1, 3, 15, 63, 255, 1023)        # loss at these context positions
-
-
-def load(args, device):
-    if args.hf:
-        model, name = GPT.from_pretrained(args.hf), f'openai/{args.hf}'
-    else:
-        ck = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-        model = GPT(GPTConfig(**ck['config']))
-        model.load_state_dict(ck['model'])
-        name = f'{os.path.basename(args.checkpoint)} (step {ck.get("step", "?")})'
-    return model.eval().to(device), name
 
 
 def main():
@@ -56,8 +44,9 @@ def main():
     device = pick_device(args.device)
     # bf16 autocast where it is fast and native; fp32 elsewhere (MPS/CPU) keeps results exact
     amp = torch.bfloat16 if device.startswith('cuda') else None
-    model, name = load(args, device)
-    enc = tiktoken.get_encoding('gpt2')
+    # fp32 weights (bf16 autocast on CUDA above); the file name carries the step
+    model, enc, _ = load_model(args.hf or args.checkpoint, device, dtype=torch.float32)
+    name = f'openai/{args.hf}' if args.hf else os.path.basename(args.checkpoint)
     print(f'model: {name}  device: {device}  autocast: {amp}')
 
     val_shard = next(os.path.join(args.data_root, f) for f in sorted(os.listdir(args.data_root)) if 'val' in f)
